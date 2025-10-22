@@ -1,15 +1,19 @@
 
-# streamlit_app.py — HK Podravka • Sustav (prazan) — natjecanja + rezultati + članovi + prisustvo + treneri + klub
+# streamlit_app.py — HK Podravka • Sustav (prazan)
+# Moduli: Natjecanja + Rezultati + Članovi + Prisustvo + Treneri + Klub + Dijagnostika
+# Popravljeno: sigurni widget key-evi, brisanje članova, gumb za “očisti bazu”
+
 import io
 import os
 import json
 import sqlite3
 from datetime import datetime, date
-from typing import List, Tuple
+from typing import List
 
 import pandas as pd
 import streamlit as st
 
+# ---------------------------------- Osnovno ----------------------------------
 st.set_page_config(page_title="HK Podravka — Sustav", page_icon="🥇", layout="wide")
 
 DB_PATH = "data/rezultati_knjiga1.sqlite"
@@ -21,10 +25,14 @@ UPLOADS = {
     "club": os.path.join(UPLOAD_ROOT, "club"),
 }
 
-COMP_TYPES_DEFAULT = ["PRVENSTVO HRVATSKE","REPREZENTATIVNI NASTUP","MEĐUNARODNI TURNIR","KUP","LIGA","REGIONALNO","KVALIFIKACIJE","ŠKOLSKO","OSTALO"]
-STYLES = ["GR","FS","WW","BW","MODIFICIRANI"]
-AGE_GROUPS = ["početnici","početnice","U11","U13","U15","U17","U20","U23","seniori","seniorke"]
+COMP_TYPES_DEFAULT = [
+    "PRVENSTVO HRVATSKE", "REPREZENTATIVNI NASTUP", "MEĐUNARODNI TURNIR",
+    "KUP", "LIGA", "REGIONALNO", "KVALIFIKACIJE", "ŠKOLSKO", "OSTALO",
+]
+STYLES = ["GR", "FS", "WW", "BW", "MODIFICIRANI"]
+AGE_GROUPS = ["početnici", "početnice", "U11", "U13", "U15", "U17", "U20", "U23", "seniori", "seniorke"]
 
+# ---------------------------------- Utils ------------------------------------
 def ensure_dirs():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     for p in UPLOADS.values():
@@ -59,21 +67,24 @@ def exec_many(q: str, rows: List[tuple]):
     conn.close()
 
 def save_upload(file, subfolder: str) -> str | None:
+    """Spremi upload i vrati punu putanju; None ako nema datoteke."""
     if not file:
         return None
     ensure_dirs()
-    name = file.name.replace("/", "_").replace("\\", "_")
-    path = os.path.join(UPLOADS[subfolder], name)
+    safe_name = file.name.replace("/", "_").replace("\\", "_")
+    path = os.path.join(UPLOADS[subfolder], safe_name)
     with open(path, "wb") as out:
         out.write(file.read())
     return path
 
+# ---------------------------------- DB init ----------------------------------
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
     cur.executescript("""
     PRAGMA foreign_keys=ON;
 
+    -- NATJECANJA
     CREATE TABLE IF NOT EXISTS competitions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         redni_broj INTEGER UNIQUE,
@@ -96,6 +107,7 @@ def init_db():
         created_at TEXT DEFAULT (datetime('now'))
     );
 
+    -- REZULTATI
     CREATE TABLE IF NOT EXISTS results (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         competition_id INTEGER NOT NULL REFERENCES competitions(id) ON DELETE CASCADE,
@@ -110,6 +122,7 @@ def init_db():
         created_at TEXT DEFAULT (datetime('now'))
     );
 
+    -- ČLANOVI
     CREATE TABLE IF NOT EXISTS members (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ime TEXT,
@@ -128,6 +141,7 @@ def init_db():
         created_at TEXT DEFAULT (datetime('now'))
     );
 
+    -- PRISUSTVO
     CREATE TABLE IF NOT EXISTS attendance (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         member_id INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
@@ -139,6 +153,7 @@ def init_db():
         created_at TEXT DEFAULT (datetime('now'))
     );
 
+    -- TRENERI
     CREATE TABLE IF NOT EXISTS trainers (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ime TEXT,
@@ -155,6 +170,7 @@ def init_db():
         created_at TEXT DEFAULT (datetime('now'))
     );
 
+    -- KLUB
     CREATE TABLE IF NOT EXISTS club_info (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         naziv TEXT,
@@ -177,6 +193,7 @@ def init_db():
     );
     """)
     conn.commit()
+    # default 1 row in club_info
     cur.execute("SELECT COUNT(*) FROM club_info")
     if cur.fetchone()[0] == 0:
         cur.execute("INSERT INTO club_info (id, naziv, updated_at) VALUES (1, 'HK Podravka', datetime('now'))")
@@ -185,51 +202,63 @@ def init_db():
 
 init_db()
 
-def next_redni_broj():
+# ---------------------------------- Helpers ----------------------------------
+def next_redni_broj() -> int:
     d = df_from_sql("SELECT MAX(redni_broj) AS mx FROM competitions")
-    if d.empty or d.iloc[0,0] is None: return 1
-    return int(d.iloc[0,0]) + 1
+    if d.empty or d.iloc[0, 0] is None:
+        return 1
+    return int(d.iloc[0, 0]) + 1
 
 def delete_member(member_id: int, delete_photo: bool = True) -> bool:
+    """Obriši člana i (opcionalno) fotografiju."""
     try:
         dfp = df_from_sql("SELECT foto_path FROM members WHERE id=?", (member_id,))
         if delete_photo and not dfp.empty:
             fp = str(dfp.iloc[0]["foto_path"] or "").strip()
             if fp and os.path.isfile(fp):
-                try: os.remove(fp)
-                except Exception: pass
+                try:
+                    os.remove(fp)
+                except Exception:
+                    pass
         exec_sql("DELETE FROM members WHERE id=?", (member_id,))
         return True
     except Exception:
         return False
 
 def delete_trainer(trainer_id: int, delete_files: bool = True) -> bool:
+    """Obriši trenera i (opcionalno) foto/ugovor fajlove."""
     try:
         dfp = df_from_sql("SELECT foto_path, ugovor_path FROM trainers WHERE id=?", (trainer_id,))
         if delete_files and not dfp.empty:
-            for col in ["foto_path","ugovor_path"]:
+            for col in ("foto_path", "ugovor_path"):
                 fp = str(dfp.iloc[0][col] or "").strip()
                 if fp and os.path.isfile(fp):
-                    try: os.remove(fp)
-                    except Exception: pass
+                    try:
+                        os.remove(fp)
+                    except Exception:
+                        pass
         exec_sql("DELETE FROM trainers WHERE id=?", (trainer_id,))
         return True
     except Exception:
         return False
 
+# ---------------------------------- UI ---------------------------------------
 st.title("🥇 HK Podravka — Sustav (prazan)")
 
-page = st.sidebar.radio("Navigacija", [
-    "➕ Natjecanja",
-    "🧾 Rezultati",
-    "👤 Članovi",
-    "📅 Prisustvo",
-    "🏋️ Treneri",
-    "🏛️ Klub",
-    "⚙️ Dijagnostika",
-])
+page = st.sidebar.radio(
+    "Navigacija",
+    [
+        "➕ Natjecanja",
+        "🧾 Rezultati",
+        "👤 Članovi",
+        "📅 Prisustvo",
+        "🏋️ Treneri",
+        "🏛️ Klub",
+        "⚙️ Dijagnostika",
+    ],
+)
 
-# ----------------------- NATJECANJA -----------------------
+# ----------------------- ➕ Natjecanja -----------------------
 if page == "➕ Natjecanja":
     st.subheader("➕ Unos natjecanja")
     with st.form("frm_comp_add"):
@@ -258,44 +287,54 @@ if page == "➕ Natjecanja":
         link_rez = st.text_input("Link na rezultate (URL)")
         napomena = st.text_area("Napomena", height=80)
         vijest = st.text_area("Tekst vijesti (za web objavu)", height=160)
-        imgs = st.file_uploader("Slike (više datoteka)", type=["png","jpg","jpeg","webp"], accept_multiple_files=True)
+        imgs = st.file_uploader("Slike (više datoteka)", type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True)
         if st.form_submit_button("Spremi natjecanje"):
-            comp_id = exec_sql("""
+            comp_id = exec_sql(
+                """
                 INSERT INTO competitions
                 (redni_broj, godina, datum, datum_kraj, natjecanje, ime_natjecanja, stil_hrvanja, mjesto, drzava, kratica_drzave,
                  nastupilo_podravke, ekipno, trener, napomena, link_rezultati, galerija_json, vijest)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (rb, int(godina), str(datum), str(datum_kraj), natjecanje.strip(), ime_natjecanja.strip(), stil.strip(),
-                  mjesto.strip(), drzava.strip(), kratica.strip(), int(nastupilo), ekipno.strip(), trener.strip(),
-                  napomena.strip(), link_rez.strip(), None, vijest.strip()))
+                """,
+                (
+                    rb, int(godina), str(datum), str(datum_kraj), natjecanje.strip(), ime_natjecanja.strip(), stil.strip(),
+                    mjesto.strip(), drzava.strip(), kratica.strip(), int(nastupilo), ekipno.strip(), trener.strip(),
+                    napomena.strip(), link_rez.strip(), None, vijest.strip(),
+                ),
+            )
             paths = []
             if imgs:
                 for f in imgs:
                     p = save_upload(f, "competitions")
-                    if p: paths.append(p)
+                    if p:
+                        paths.append(p)
             if paths:
                 exec_sql("UPDATE competitions SET galerija_json=? WHERE id=?", (json.dumps(paths, ensure_ascii=False), comp_id))
             st.success(f"✅ Natjecanje spremljeno (# {rb}).")
+
     st.divider()
-    dfc = df_from_sql("SELECT id, redni_broj, godina, datum, ime_natjecanja, mjesto, drzava FROM competitions ORDER BY godina DESC, datum DESC")
+    dfc = df_from_sql(
+        "SELECT id, redni_broj, godina, datum, ime_natjecanja, mjesto, drzava FROM competitions ORDER BY godina DESC, datum DESC"
+    )
     st.dataframe(dfc, use_container_width=True)
 
-# ----------------------- REZULTATI -----------------------
+# ----------------------- 🧾 Rezultati -----------------------
 elif page == "🧾 Rezultati":
     st.subheader("🧾 Unos rezultata (po natjecanju)")
     dfc = df_from_sql("SELECT id, redni_broj, datum, ime_natjecanja FROM competitions ORDER BY godina DESC, datum DESC")
     if dfc.empty:
         st.info("Prvo dodaj natjecanje.")
     else:
-        comp_labels = dfc.apply(lambda r: f"#{int(r['redni_broj'])} — {r['datum']} — {r['ime_natjecanja'] or ''}", axis=1).tolist()
-        comp_map = {comp_labels[i]: int(dfc.iloc[i]['id']) for i in range(len(comp_labels))}
+        comp_labels = dfc.apply(lambda rr: f"#{int(rr['redni_broj'])} — {rr['datum']} — {rr['ime_natjecanja'] or ''}", axis=1).tolist()
+        comp_map = {comp_labels[i]: int(dfc.iloc[i]["id"]) for i in range(len(comp_labels))}
         sel = st.selectbox("Natjecanje", comp_labels)
         competition_id = comp_map[sel]
+
         with st.form("frm_res"):
             c1, c2, c3 = st.columns(3)
             with c1:
                 ime_prezime = st.text_input("Ime i prezime")
-                spol = st.selectbox("Spol", ["M","Ž"])
+                spol = st.selectbox("Spol", ["M", "Ž"])
                 kategorija = st.text_input("Kategorija")
                 uzrast = st.selectbox("Uzrast", AGE_GROUPS, index=2)
             with c2:
@@ -308,33 +347,38 @@ elif page == "🧾 Rezultati":
                 if not ime_prezime.strip():
                     st.error("Ime i prezime je obavezno.")
                 else:
-                    exec_sql("""
+                    exec_sql(
+                        """
                         INSERT INTO results (competition_id, ime_prezime, spol, plasman, kategorija, uzrast, borbi, pobjeda, izgubljenih)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (competition_id, ime_prezime.strip(), spol, plasman.strip(),
-                          kategorija.strip(), uzrast.strip(), int(borbi), int(pobjeda), int(izgubljenih)))
+                        """,
+                        (competition_id, ime_prezime.strip(), spol, plasman.strip(), kategorija.strip(), uzrast.strip(), int(borbi), int(pobjeda), int(izgubljenih)),
+                    )
                     st.success("✅ Rezultat spremljen.")
+
     st.divider()
-    dfr = df_from_sql("""
+    dfr = df_from_sql(
+        """
         SELECT r.id, c.redni_broj, c.ime_natjecanja, c.datum, r.ime_prezime, r.spol, r.kategorija, r.uzrast,
                r.borbi, r.pobjeda, r.izgubljenih, r.plasman
         FROM results r JOIN competitions c ON c.id=r.competition_id
         ORDER BY r.id DESC LIMIT 200
-    """)
+        """
+    )
     st.dataframe(dfr, use_container_width=True)
 
-# ----------------------- ČLANOVI -----------------------
+# ----------------------- 👤 Članovi -----------------------
 elif page == "👤 Članovi":
     tab_add, tab_edit, tab_list = st.tabs(["➕ Dodaj", "🛠 Uredi/obriši", "📋 Popis & izvoz"])
 
-    # Dodaj
+    # ➕ Dodaj
     with tab_add:
         with st.form("frm_member_add"):
             c1, c2, c3 = st.columns(3)
             with c1:
                 ime = st.text_input("Ime *")
                 prezime = st.text_input("Prezime *")
-                datum_rod = st.date_input("Datum rođenja", value=date(2010,1,1))
+                datum_rod = st.date_input("Datum rođenja", value=date(2010, 1, 1))
             with c2:
                 godina_rod = st.number_input("Godina rođenja", 1900, 2100, 2010, 1)
                 email_s = st.text_input("E-mail sportaša")
@@ -349,43 +393,50 @@ elif page == "👤 Članovi":
                 adresa = st.text_input("Adresa prebivališta")
             with c5:
                 grupa = st.text_input("Grupa treninga (npr. U13)")
-                foto = st.file_uploader("Fotografija (opcionalno)", type=["png","jpg","jpeg","webp"])
+                foto = st.file_uploader("Fotografija (opcionalno)", type=["png", "jpg", "jpeg", "webp"])
             if st.form_submit_button("Spremi člana"):
                 foto_path = save_upload(foto, "members") if foto else None
-                exec_sql("""
+                exec_sql(
+                    """
                     INSERT INTO members
                     (ime, prezime, datum_rodjenja, godina_rodjenja, email_sportas, email_roditelj,
                      telefon_sportas, telefon_roditelj, clanski_broj, oib, adresa, grupa_trening, foto_path)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (ime.strip(), prezime.strip(), str(datum_rod), int(godina_rod), email_s.strip(), email_r.strip(),
-                      tel_s.strip(), tel_r.strip(), cl_br.strip(), oib.strip(), adresa.strip(), grupa.strip(), foto_path))
+                    """,
+                    (
+                        ime.strip(), prezime.strip(), str(datum_rod), int(godina_rod), email_s.strip(), email_r.strip(),
+                        tel_s.strip(), tel_r.strip(), cl_br.strip(), oib.strip(), adresa.strip(), grupa.strip(), foto_path,
+                    ),
+                )
                 st.success("✅ Član dodan.")
 
-    # Uredi / obriši
+    # 🛠 Uredi / obriši
     with tab_edit:
         dfm = df_from_sql("SELECT * FROM members ORDER BY prezime, ime")
         if dfm.empty:
             st.info("Nema članova.")
         else:
-            labels = dfm.apply(lambda r: f"{r['prezime']} {r['ime']} — {r.get('grupa_trening','')}", axis=1).tolist()
+            labels = dfm.apply(lambda rr: f"{rr['prezime']} {rr['ime']} — {rr.get('grupa_trening','')}", axis=1).tolist()
             idx = st.selectbox("Odaberi člana", list(range(len(labels))), format_func=lambda i: labels[i])
             r = dfm.iloc[idx]
-            fp = str(r.get("foto_path") or "").strip()
-            if fp and os.path.isfile(fp):
-                st.image(fp, width=220, caption="Fotografija člana")
+
+            fp_show = str(r.get("foto_path") or "").strip()
+            if fp_show and os.path.isfile(fp_show):
+                st.image(fp_show, width=220, caption="Fotografija člana")
+
             with st.form("frm_member_edit"):
                 c1, c2, c3 = st.columns(3)
                 with c1:
                     ime = st.text_input("Ime *", value=str(r["ime"] or ""))
                     prezime = st.text_input("Prezime *", value=str(r["prezime"] or ""))
                     try:
-                        init_date = pd.to_datetime(r["datum_rodjenja"]).date() if r["datum_rodjenja"] else date(2010,1,1)
+                        init_date = pd.to_datetime(r["datum_rodjenja"]).date() if r["datum_rodjenja"] else date(2010, 1, 1)
                     except Exception:
-                        init_date = date(2010,1,1)
+                        init_date = date(2010, 1, 1)
                     datum_rod = st.date_input("Datum rođenja", value=init_date)
                 with c2:
-                    val = pd.to_numeric(r.get("godina_rodjenja"), errors="coerce")
-                    init_god = int(val) if pd.notna(val) else 2010
+                    god_v = pd.to_numeric(r.get("godina_rodjenja"), errors="coerce")
+                    init_god = int(god_v) if pd.notna(god_v) else 2010
                     godina_rod = st.number_input("Godina rođenja", 1900, 2100, init_god, 1)
                     email_s = st.text_input("E-mail sportaša", value=str(r["email_sportas"] or ""))
                     email_r = st.text_input("E-mail roditelja", value=str(r["email_roditelj"] or ""))
@@ -399,67 +450,87 @@ elif page == "👤 Članovi":
                     adresa = st.text_input("Adresa prebivališta", value=str(r["adresa"] or ""))
                 with c5:
                     grupa = st.text_input("Grupa treninga", value=str(r["grupa_trening"] or ""))
-                    nova_foto = st.file_uploader("Zamijeni/učitaj fotografiju", type=["png","jpg","jpeg","webp"])
+                    nova_foto = st.file_uploader("Zamijeni/učitaj fotografiju", type=["png", "jpg", "jpeg", "webp"])
+
                 if st.form_submit_button("Spremi izmjene"):
                     foto_path = r.get("foto_path")
                     if nova_foto is not None:
                         foto_path = save_upload(nova_foto, "members") or foto_path
-                    exec_sql("""
+                    exec_sql(
+                        """
                         UPDATE members SET
                         ime=?, prezime=?, datum_rodjenja=?, godina_rodjenja=?, email_sportas=?, email_roditelj=?,
                         telefon_sportas=?, telefon_roditelj=?, clanski_broj=?, oib=?, adresa=?, grupa_trening=?, foto_path=?
                         WHERE id=?
-                    """, (ime.strip(), prezime.strip(), str(datum_rod), int(godina_rod), email_s.strip(), email_r.strip(),
-                          tel_s.strip(), tel_r.strip(), cl_br.strip(), oib.strip(), adresa.strip(), grupa.strip(),
-                          foto_path, int(r["id"])))
+                        """,
+                        (
+                            ime.strip(), prezime.strip(), str(datum_rod), int(godina_rod), email_s.strip(), email_r.strip(),
+                            tel_s.strip(), tel_r.strip(), cl_br.strip(), oib.strip(), adresa.strip(), grupa.strip(),
+                            foto_path, int(r["id"]),
+                        ),
+                    )
                     st.success("✅ Izmjene spremljene.")
                     st.experimental_rerun()
+
+            # --- Brisanje člana (SAFE: jedinstveni key-evi) ---
             st.markdown("---")
             st.subheader("🗑️ Brisanje člana")
-            c1, c2, c3 = st.columns([1,1,2])
-            with c1:
-                del_photo = st.checkbox("Obriši i fotografiju", value=True)
-            with c2:
-                confirm = st.checkbox("Potvrđujem brisanje")
-            with c3:
-                if st.button("🗑️ Obriši ovog člana", disabled=not confirm, type="primary"):
-                    if delete_member(int(r["id"]), delete_photo=del_photo):
+
+            col_a, col_b, col_c = st.columns([1, 1, 2])
+            with col_a:
+                del_photo = st.checkbox("Obriši i fotografiju", value=True, key="member_del_photo")
+            with col_b:
+                confirm_del = st.checkbox("Potvrđujem brisanje", key="member_confirm_delete")
+            with col_c:
+                if st.button("🗑️ Obriši ovog člana", disabled=not confirm_del, type="primary", key="member_delete_btn"):
+                    ok = delete_member(int(r["id"]), delete_photo=del_photo)
+                    if ok:
                         st.success(f"Član {r['prezime']} {r['ime']} obrisan.")
                         st.experimental_rerun()
                     else:
                         st.error("Brisanje nije uspjelo.")
 
-    # Popis & izvoz (osnovno)
+    # 📋 Popis & izvoz (osnovno)
     with tab_list:
-        dfm = df_from_sql("SELECT ime, prezime, grupa_trening, datum_rodjenja, godina_rodjenja, email_sportas, email_roditelj, telefon_sportas, telefon_roditelj, clanski_broj, oib, adresa, foto_path FROM members ORDER BY prezime, ime")
+        dfm = df_from_sql(
+            "SELECT ime, prezime, grupa_trening, datum_rodjenja, godina_rodjenja, email_sportas, email_roditelj, telefon_sportas, telefon_roditelj, clanski_broj, oib, adresa, foto_path FROM members ORDER BY prezime, ime"
+        )
         st.dataframe(dfm, use_container_width=True)
 
-# ----------------------- PRISUSTVO -----------------------
+# ----------------------- 📅 Prisustvo -----------------------
 elif page == "📅 Prisustvo":
     st.subheader("📅 Evidencija prisustva")
     d = st.date_input("Datum", value=date.today())
-    termin = st.selectbox("Termin", ["18:30-20:00","20:00-22:00","Upiši ručno…"])
-    if termin == "Upiši ručno…":
-        termin = st.text_input("Termin (npr. 09:00-10:30)")
+    termin_sel = st.selectbox("Termin", ["18:30-20:00", "20:00-22:00", "Upiši ručno…"])
+    termin = st.text_input("Termin (npr. 09:00-10:30)") if termin_sel == "Upiši ručno…" else termin_sel
+
     df_groups = df_from_sql("SELECT DISTINCT grupa_trening FROM members WHERE grupa_trening IS NOT NULL AND grupa_trening<>'' ORDER BY 1")
     grupe = df_groups["grupa_trening"].dropna().astype(str).tolist()
     grupa = st.selectbox("Grupa", ["(sve)"] + grupe)
+
     if grupa == "(sve)":
         dfm = df_from_sql("SELECT id, ime, prezime, grupa_trening FROM members ORDER BY prezime, ime")
     else:
-        dfm = df_from_sql("SELECT id, ime, prezime, grupa_trening FROM members WHERE grupa_trening=? ORDER BY prezime, ime", (grupa,))
+        dfm = df_from_sql(
+            "SELECT id, ime, prezime, grupa_trening FROM members WHERE grupa_trening=? ORDER BY prezime, ime", (grupa,)
+        )
+
     if dfm.empty:
         st.info("Nema članova u odabranoj grupi.")
     else:
         ids = dfm["id"].tolist()
-        labels = dfm.apply(lambda r: f"{r['prezime']} {r['ime']} ({r.get('grupa_trening','')})", axis=1).tolist()
+        labels = dfm.apply(lambda rr: f"{rr['prezime']} {rr['ime']} ({rr.get('grupa_trening','')})", axis=1).tolist()
         checked = st.multiselect("Označi prisutne", options=ids, format_func=lambda mid: labels[ids.index(mid)])
         trajanje = st.number_input("Trajanje treninga (minute)", 30, 180, 90, 5)
         if st.button("💾 Spremi prisustvo"):
-            rows = [(int(mid), str(d), termin.strip(), "" if grupa=="(sve)" else grupa, 1, int(trajanje)) for mid in checked]
+            rows = [(int(mid), str(d), termin.strip(), "" if grupa == "(sve)" else grupa, 1, int(trajanje)) for mid in checked]
             if rows:
-                exec_many("INSERT INTO attendance (member_id, datum, termin, grupa, prisutan, trajanje_min) VALUES (?, ?, ?, ?, ?, ?)", rows)
+                exec_many(
+                    "INSERT INTO attendance (member_id, datum, termin, grupa, prisutan, trajanje_min) VALUES (?, ?, ?, ?, ?, ?)",
+                    rows,
+                )
             st.success(f"Spremljeno prisutnih: {len(rows)}")
+
     st.divider()
     st.subheader("📈 Zadnjih 200")
     q = """
@@ -470,7 +541,7 @@ elif page == "📅 Prisustvo":
     """
     st.dataframe(df_from_sql(q), use_container_width=True)
 
-# ----------------------- TRENERI -----------------------
+# ----------------------- 🏋️ Treneri -----------------------
 elif page == "🏋️ Treneri":
     tab_add, tab_edit, tab_list = st.tabs(["➕ Dodaj trenera", "🛠 Uredi/obriši", "📋 Popis & izvoz"])
 
@@ -480,7 +551,7 @@ elif page == "🏋️ Treneri":
             with c1:
                 ime = st.text_input("Ime *")
                 prezime = st.text_input("Prezime *")
-                datum_rod = st.date_input("Datum rođenja", value=date(1990,1,1))
+                datum_rod = st.date_input("Datum rođenja", value=date(1990, 1, 1))
             with c2:
                 osobna = st.text_input("Broj osobne iskaznice")
                 iban = st.text_input("IBAN (HR...)")
@@ -489,15 +560,18 @@ elif page == "🏋️ Treneri":
                 email = st.text_input("E-mail")
                 oib = st.text_input("OIB")
                 napomena = st.text_area("Napomena", height=80)
-            foto = st.file_uploader("Fotografija (JPG/PNG/WEBP)", type=["png","jpg","jpeg","webp"])
-            ugovor = st.file_uploader("Ugovor s klubom (PDF/DOC/DOCX)", type=["pdf","doc","docx"])
+            foto = st.file_uploader("Fotografija (JPG/PNG/WEBP)", type=["png", "jpg", "jpeg", "webp"])
+            ugovor = st.file_uploader("Ugovor s klubom (PDF/DOC/DOCX)", type=["pdf", "doc", "docx"])
             if st.form_submit_button("Spremi trenera"):
                 foto_path = save_upload(foto, "trainers") if foto else None
                 ugovor_path = save_upload(ugovor, "trainers") if ugovor else None
-                exec_sql("""
+                exec_sql(
+                    """
                     INSERT INTO trainers (ime, prezime, datum_rodjenja, oib, osobna_broj, iban, telefon, email, foto_path, ugovor_path, napomena)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (ime.strip(), prezime.strip(), str(datum_rod), oib.strip(), osobna.strip(), iban.strip(), telefon.strip(), email.strip(), foto_path, ugovor_path, napomena.strip()))
+                    """,
+                    (ime.strip(), prezime.strip(), str(datum_rod), oib.strip(), osobna.strip(), iban.strip(), telefon.strip(), email.strip(), foto_path, ugovor_path, napomena.strip()),
+                )
                 st.success("✅ Trener dodan.")
 
     with tab_edit:
@@ -505,21 +579,23 @@ elif page == "🏋️ Treneri":
         if dft.empty:
             st.info("Nema trenera.")
         else:
-            labels = dft.apply(lambda r: f"{r['prezime']} {r['ime']}", axis=1).tolist()
+            labels = dft.apply(lambda rr: f"{rr['prezime']} {rr['ime']}", axis=1).tolist()
             idx = st.selectbox("Odaberi trenera", list(range(len(labels))), format_func=lambda i: labels[i])
             r = dft.iloc[idx]
-            fp = str(r.get("foto_path") or "").strip()
-            if fp and os.path.isfile(fp):
-                st.image(fp, width=220, caption="Fotografija trenera")
+
+            fp_t = str(r.get("foto_path") or "").strip()
+            if fp_t and os.path.isfile(fp_t):
+                st.image(fp_t, width=220, caption="Fotografija trenera")
+
             with st.form("frm_trainer_edit"):
                 c1, c2, c3 = st.columns(3)
                 with c1:
                     ime = st.text_input("Ime *", value=str(r["ime"] or ""))
                     prezime = st.text_input("Prezime *", value=str(r["prezime"] or ""))
                     try:
-                        init_date = pd.to_datetime(r["datum_rodjenja"]).date() if r["datum_rodjenja"] else date(1990,1,1)
+                        init_date = pd.to_datetime(r["datum_rodjenja"]).date() if r["datum_rodjenja"] else date(1990, 1, 1)
                     except Exception:
-                        init_date = date(1990,1,1)
+                        init_date = date(1990, 1, 1)
                     datum_rod = st.date_input("Datum rođenja", value=init_date)
                 with c2:
                     osobna = st.text_input("Broj osobne iskaznice", value=str(r["osobna_broj"] or ""))
@@ -529,8 +605,9 @@ elif page == "🏋️ Treneri":
                     email = st.text_input("E-mail", value=str(r["email"] or ""))
                     oib = st.text_input("OIB", value=str(r["oib"] or ""))
                     napomena = st.text_area("Napomena", value=str(r["napomena"] or ""), height=80)
-                nova_foto = st.file_uploader("Zamijeni fotografiju", type=["png","jpg","jpeg","webp"])
-                novi_ugovor = st.file_uploader("Dodaj/zamijeni ugovor", type=["pdf","doc","docx"])
+                nova_foto = st.file_uploader("Zamijeni fotografiju", type=["png", "jpg", "jpeg", "webp"])
+                novi_ugovor = st.file_uploader("Dodaj/zamijeni ugovor", type=["pdf", "doc", "docx"])
+
                 if st.form_submit_button("Spremi izmjene"):
                     foto_path = r.get("foto_path")
                     if nova_foto is not None:
@@ -538,22 +615,27 @@ elif page == "🏋️ Treneri":
                     ugovor_path = r.get("ugovor_path")
                     if novi_ugovor is not None:
                         ugovor_path = save_upload(novi_ugovor, "trainers") or ugovor_path
-                    exec_sql("""
+                    exec_sql(
+                        """
                         UPDATE trainers SET
                             ime=?, prezime=?, datum_rodjenja=?, oib=?, osobna_broj=?, iban=?, telefon=?, email=?, foto_path=?, ugovor_path=?, napomena=?
                         WHERE id=?
-                    """, (ime.strip(), prezime.strip(), str(datum_rod), oib.strip(), osobna.strip(), iban.strip(), telefon.strip(), email.strip(), foto_path, ugovor_path, napomena.strip(), int(r["id"])))
+                        """,
+                        (ime.strip(), prezime.strip(), str(datum_rod), oib.strip(), osobna.strip(), iban.strip(), telefon.strip(), email.strip(), foto_path, ugovor_path, napomena.strip(), int(r["id"])),
+                    )
                     st.success("✅ Izmjene spremljene.")
                     st.experimental_rerun()
+
+            # Brisanje trenera
             st.markdown("---")
             st.subheader("🗑️ Brisanje trenera")
-            c1, c2, c3 = st.columns([1,1,2])
+            c1, c2, c3 = st.columns([1, 1, 2])
             with c1:
-                del_files = st.checkbox("Obriši i datoteke", value=True)
+                del_files = st.checkbox("Obriši i datoteke", value=True, key="trainer_del_files")
             with c2:
-                confirm = st.checkbox("Potvrđujem brisanje")
+                confirm_tr = st.checkbox("Potvrđujem brisanje", key="trainer_confirm_delete")
             with c3:
-                if st.button("🗑️ Obriši ovog trenera", disabled=not confirm, type="primary"):
+                if st.button("🗑️ Obriši ovog trenera", disabled=not confirm_tr, type="primary", key="trainer_delete_btn"):
                     if delete_trainer(int(r["id"]), delete_files=del_files):
                         st.success(f"Trener {r['prezime']} {r['ime']} obrisan.")
                         st.experimental_rerun()
@@ -561,53 +643,64 @@ elif page == "🏋️ Treneri":
                         st.error("Brisanje nije uspjelo.")
 
     with tab_list:
-        dft = df_from_sql("SELECT ime, prezime, datum_rodjenja, osobna_broj, iban, telefon, email, oib, foto_path, ugovor_path FROM trainers ORDER BY prezime, ime")
+        dft = df_from_sql(
+            "SELECT ime, prezime, datum_rodjenja, osobna_broj, iban, telefon, email, oib, foto_path, ugovor_path FROM trainers ORDER BY prezime, ime"
+        )
         st.dataframe(dft, use_container_width=True)
 
-# ----------------------- KLUB -----------------------
+# ----------------------- 🏛️ Klub -----------------------
 elif page == "🏛️ Klub":
     st.subheader("🏛️ Podaci o klubu")
     dfc = df_from_sql("SELECT * FROM club_info WHERE id=1")
     if dfc.empty:
         st.error("Nije inicijalizirano. Otvori Dijagnostika i inicijaliziraj bazu.")
     else:
-        r = dfc.iloc[0]
+        r_club = dfc.iloc[0]
         with st.form("frm_club"):
             c1, c2 = st.columns(2)
             with c1:
-                naziv = st.text_input("Naziv kluba", value=str(r.get("naziv","") or ""))
-                adresa = st.text_input("Adresa", value=str(r.get("adresa","") or ""))
-                grad = st.text_input("Grad", value=str(r.get("grad","") or ""))
-                oib = st.text_input("OIB", value=str(r.get("oib","") or ""))
+                naziv = st.text_input("Naziv kluba", value=str(r_club.get("naziv", "") or ""))
+                adresa = st.text_input("Adresa", value=str(r_club.get("adresa", "") or ""))
+                grad = st.text_input("Grad", value=str(r_club.get("grad", "") or ""))
+                oib_k = st.text_input("OIB", value=str(r_club.get("oib", "") or ""))
             with c2:
-                iban = st.text_input("IBAN", value=str(r.get("iban","") or ""))
-                email = st.text_input("E-mail", value=str(r.get("email","") or ""))
-                telefon = st.text_input("Telefon", value=str(r.get("telefon","") or ""))
-                web = st.text_input("Web", value=str(r.get("web","") or ""))
-            logo = st.file_uploader("Logo (opcionalno)", type=["png","jpg","jpeg","webp"])
+                iban_k = st.text_input("IBAN", value=str(r_club.get("iban", "") or ""))
+                email_k = st.text_input("E-mail", value=str(r_club.get("email", "") or ""))
+                telefon_k = st.text_input("Telefon", value=str(r_club.get("telefon", "") or ""))
+                web_k = st.text_input("Web", value=str(r_club.get("web", "") or ""))
+            logo = st.file_uploader("Logo (opcionalno)", type=["png", "jpg", "jpeg", "webp"])
             if st.form_submit_button("Spremi podatke"):
-                logo_path = str(r.get("logo_path") or "")
+                logo_path = str(r_club.get("logo_path") or "")
                 if logo is not None:
                     logo_path = save_upload(logo, "club") or logo_path
-                exec_sql("""
-                    UPDATE club_info SET naziv=?, adresa=?, grad=?, oib=?, iban=?, email=?, telefon=?, web=?, logo_path=?, updated_at=datetime('now') WHERE id=1
-                """, (naziv.strip(), adresa.strip(), grad.strip(), oib.strip(), iban.strip(), email.strip(), telefon.strip(), web.strip(), logo_path))
+                exec_sql(
+                    """
+                    UPDATE club_info
+                       SET naziv=?, adresa=?, grad=?, oib=?, iban=?, email=?, telefon=?, web=?, logo_path=?, updated_at=datetime('now')
+                     WHERE id=1
+                    """,
+                    (naziv.strip(), adresa.strip(), grad.strip(), oib_k.strip(), iban_k.strip(), email_k.strip(), telefon_k.strip(), web_k.strip(), logo_path),
+                )
                 st.success("✅ Podaci spremljeni.")
-        dfc = df_from_sql("SELECT logo_path FROM club_info WHERE id=1")
-        lp = str(dfc.iloc[0]["logo_path"] or "") if not dfc.empty else ""
+
+        # prikaz loga
+        df_logo = df_from_sql("SELECT logo_path FROM club_info WHERE id=1")
+        lp = str(df_logo.iloc[0]["logo_path"] or "") if not df_logo.empty else ""
         if lp and os.path.isfile(lp):
             st.image(lp, width=220, caption="Logo kluba")
+
         st.markdown("---")
         st.subheader("📎 Dokumenti kluba (npr. Statut, Pravilnici)")
         title = st.text_input("Naslov dokumenta")
-        doc = st.file_uploader("Dokument (PDF/DOC/DOCX)", type=["pdf","doc","docx"])
+        doc = st.file_uploader("Dokument (PDF/DOC/DOCX)", type=["pdf", "doc", "docx"])
         if st.button("📤 Učitaj dokument"):
             if not title or not doc:
                 st.error("Unesi naslov i dokument.")
             else:
-                p = save_upload(doc, "club")
-                exec_sql("INSERT INTO club_documents (title, file_path) VALUES (?, ?)", (title.strip(), p))
+                pth = save_upload(doc, "club")
+                exec_sql("INSERT INTO club_documents (title, file_path) VALUES (?, ?)", (title.strip(), pth))
                 st.success("✅ Dokument učitan.")
+
         dcd = df_from_sql("SELECT id, title, file_path, uploaded_at FROM club_documents ORDER BY uploaded_at DESC")
         st.dataframe(dcd, use_container_width=True)
         del_id = st.number_input("ID dokumenta za brisanje", min_value=0, step=1, value=0)
@@ -617,12 +710,14 @@ elif page == "🏛️ Klub":
                 if not row.empty:
                     fp = str(row.iloc[0]["file_path"] or "")
                     if fp and os.path.isfile(fp):
-                        try: os.remove(fp)
-                        except Exception: pass
+                        try:
+                            os.remove(fp)
+                        except Exception:
+                            pass
                 exec_sql("DELETE FROM club_documents WHERE id=?", (int(del_id),))
                 st.success("Dokument obrisan.")
 
-# ----------------------- DIJAGNOSTIKA -----------------------
+# ----------------------- ⚙️ Dijagnostika -----------------------
 else:
     st.subheader("⚙️ Dijagnostika")
     st.write("🗃️ Put do baze:", os.path.abspath(DB_PATH))
@@ -633,7 +728,42 @@ else:
     tables = pd.read_sql("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name", conn)
     conn.close()
     st.write("Tablice u bazi:", tables)
+
     if st.button("🔧 Inicijaliziraj/kreiraj bazu (ponovno)"):
         init_db()
         st.success("Baza inicijalizirana.")
+
+    # 🔥 Očisti sve podatke (reset bez brisanja tablica)
+    st.markdown("---")
+    st.subheader("🗑️ Očisti sve podatke u bazi")
+
+    confirm_wipe = st.checkbox(
+        "Potvrđujem brisanje svih podataka (ne može se vratiti!)", key="wipe_confirm"
+    )
+    if st.button(
+        "🔥 Obriši sve tablice (sadržaj)", disabled=not confirm_wipe, type="primary", key="wipe_btn"
+    ):
+        try:
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.executescript("""
+            DELETE FROM attendance;
+            DELETE FROM results;
+            DELETE FROM competitions;
+            DELETE FROM members;
+            DELETE FROM trainers;
+            DELETE FROM club_documents;
+
+            UPDATE club_info
+               SET naziv='HK Podravka',
+                   adresa=NULL, grad=NULL, oib=NULL, iban=NULL,
+                   email=NULL, telefon=NULL, web=NULL, logo_path=NULL,
+                   updated_at=datetime('now');
+            """)
+            conn.commit()
+            conn.close()
+            st.success("✅ Svi podaci su obrisani. Struktura tablica je ostala.")
+        except Exception as e:
+            st.error(f"Greška pri brisanju: {e}")
+
 
