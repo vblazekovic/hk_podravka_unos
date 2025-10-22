@@ -745,7 +745,7 @@ elif page == "👤 Članovi":
         if dfm.empty:
             st.info("Nema članova.")
         else:
-            labels = dfm.apply(lambda r: f\"{r['prezime']} {r['ime']} — {r.get('clanski_broj','')}\", axis=1).tolist()
+            labels = dfm.apply(lambda r: f"{r['prezime']} {r['ime']} — {r.get('clanski_broj', '')}", axis=1).tolist()
             idx = st.selectbox("Odaberi člana", list(range(len(labels))), format_func=lambda i: labels[i])
             r = dfm.iloc[idx]
 
