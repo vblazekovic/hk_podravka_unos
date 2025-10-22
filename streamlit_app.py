@@ -229,6 +229,7 @@ page = st.sidebar.radio("Navigacija", [
     "⚙️ Dijagnostika",
 ])
 
+# ----------------------- NATJECANJA -----------------------
 if page == "➕ Natjecanja":
     st.subheader("➕ Unos natjecanja")
     with st.form("frm_comp_add"):
@@ -279,6 +280,7 @@ if page == "➕ Natjecanja":
     dfc = df_from_sql("SELECT id, redni_broj, godina, datum, ime_natjecanja, mjesto, drzava FROM competitions ORDER BY godina DESC, datum DESC")
     st.dataframe(dfc, use_container_width=True)
 
+# ----------------------- REZULTATI -----------------------
 elif page == "🧾 Rezultati":
     st.subheader("🧾 Unos rezultata (po natjecanju)")
     dfc = df_from_sql("SELECT id, redni_broj, datum, ime_natjecanja FROM competitions ORDER BY godina DESC, datum DESC")
@@ -321,8 +323,11 @@ elif page == "🧾 Rezultati":
     """)
     st.dataframe(dfr, use_container_width=True)
 
+# ----------------------- ČLANOVI -----------------------
 elif page == "👤 Članovi":
     tab_add, tab_edit, tab_list = st.tabs(["➕ Dodaj", "🛠 Uredi/obriši", "📋 Popis & izvoz"])
+
+    # Dodaj
     with tab_add:
         with st.form("frm_member_add"):
             c1, c2, c3 = st.columns(3)
@@ -355,6 +360,8 @@ elif page == "👤 Članovi":
                 """, (ime.strip(), prezime.strip(), str(datum_rod), int(godina_rod), email_s.strip(), email_r.strip(),
                       tel_s.strip(), tel_r.strip(), cl_br.strip(), oib.strip(), adresa.strip(), grupa.strip(), foto_path))
                 st.success("✅ Član dodan.")
+
+    # Uredi / obriši
     with tab_edit:
         dfm = df_from_sql("SELECT * FROM members ORDER BY prezime, ime")
         if dfm.empty:
@@ -421,10 +428,13 @@ elif page == "👤 Članovi":
                         st.experimental_rerun()
                     else:
                         st.error("Brisanje nije uspjelo.")
+
+    # Popis & izvoz (osnovno)
     with tab_list:
         dfm = df_from_sql("SELECT ime, prezime, grupa_trening, datum_rodjenja, godina_rodjenja, email_sportas, email_roditelj, telefon_sportas, telefon_roditelj, clanski_broj, oib, adresa, foto_path FROM members ORDER BY prezime, ime")
         st.dataframe(dfm, use_container_width=True)
 
+# ----------------------- PRISUSTVO -----------------------
 elif page == "📅 Prisustvo":
     st.subheader("📅 Evidencija prisustva")
     d = st.date_input("Datum", value=date.today())
@@ -460,8 +470,10 @@ elif page == "📅 Prisustvo":
     """
     st.dataframe(df_from_sql(q), use_container_width=True)
 
+# ----------------------- TRENERI -----------------------
 elif page == "🏋️ Treneri":
     tab_add, tab_edit, tab_list = st.tabs(["➕ Dodaj trenera", "🛠 Uredi/obriši", "📋 Popis & izvoz"])
+
     with tab_add:
         with st.form("frm_trainer_add"):
             c1, c2, c3 = st.columns(3)
@@ -487,6 +499,7 @@ elif page == "🏋️ Treneri":
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (ime.strip(), prezime.strip(), str(datum_rod), oib.strip(), osobna.strip(), iban.strip(), telefon.strip(), email.strip(), foto_path, ugovor_path, napomena.strip()))
                 st.success("✅ Trener dodan.")
+
     with tab_edit:
         dft = df_from_sql("SELECT * FROM trainers ORDER BY prezime, ime")
         if dft.empty:
@@ -546,10 +559,12 @@ elif page == "🏋️ Treneri":
                         st.experimental_rerun()
                     else:
                         st.error("Brisanje nije uspjelo.")
+
     with tab_list:
         dft = df_from_sql("SELECT ime, prezime, datum_rodjenja, osobna_broj, iban, telefon, email, oib, foto_path, ugovor_path FROM trainers ORDER BY prezime, ime")
         st.dataframe(dft, use_container_width=True)
 
+# ----------------------- KLUB -----------------------
 elif page == "🏛️ Klub":
     st.subheader("🏛️ Podaci o klubu")
     dfc = df_from_sql("SELECT * FROM club_info WHERE id=1")
@@ -607,6 +622,7 @@ elif page == "🏛️ Klub":
                 exec_sql("DELETE FROM club_documents WHERE id=?", (int(del_id),))
                 st.success("Dokument obrisan.")
 
+# ----------------------- DIJAGNOSTIKA -----------------------
 else:
     st.subheader("⚙️ Dijagnostika")
     st.write("🗃️ Put do baze:", os.path.abspath(DB_PATH))
@@ -620,3 +636,4 @@ else:
     if st.button("🔧 Inicijaliziraj/kreiraj bazu (ponovno)"):
         init_db()
         st.success("Baza inicijalizirana.")
+
