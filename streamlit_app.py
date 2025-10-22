@@ -1,7 +1,7 @@
 
 # streamlit_app.py — HK Podravka • Sustav (prazan)
-# Moduli: Natjecanja + Rezultati + Članovi + Prisustvo + Treneri + Klub + Dijagnostika
-# Popravljeno: sigurni widget key-evi, brisanje članova, gumb za “očisti bazu”
+# Moduli: Natjecanja + Rezultati + Članovi + Prisustvo + Prisustvo trenera + Treneri + Klub + Dijagnostika
+# Popravljeno: sigurni widget key-evi, brisanje članova, gumb za “očisti bazu”, dodano prisustvo trenera
 
 import io
 import os
@@ -141,7 +141,7 @@ def init_db():
         created_at TEXT DEFAULT (datetime('now'))
     );
 
-    -- PRISUSTVO
+    -- PRISUSTVO ČLANOVA
     CREATE TABLE IF NOT EXISTS attendance (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         member_id INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
@@ -166,6 +166,19 @@ def init_db():
         email TEXT,
         foto_path TEXT,
         ugovor_path TEXT,
+        napomena TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    -- PRISUSTVO TRENERA (NOVO)
+    CREATE TABLE IF NOT EXISTS trainer_attendance (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trainer_id INTEGER NOT NULL REFERENCES trainers(id) ON DELETE CASCADE,
+        datum TEXT NOT NULL,          -- YYYY-MM-DD
+        grupa TEXT,                   -- npr. U13
+        vrijeme_od TEXT,              -- HH:MM
+        vrijeme_do TEXT,              -- HH:MM
+        trajanje_min INTEGER,         -- minute
         napomena TEXT,
         created_at TEXT DEFAULT (datetime('now'))
     );
@@ -252,6 +265,7 @@ page = st.sidebar.radio(
         "🧾 Rezultati",
         "👤 Članovi",
         "📅 Prisustvo",
+        "📘 Prisustvo trenera",  # NOVO
         "🏋️ Treneri",
         "🏛️ Klub",
         "⚙️ Dijagnostika",
@@ -470,7 +484,7 @@ elif page == "👤 Članovi":
                         ),
                     )
                     st.success("✅ Izmjene spremljene.")
-                    st.experimental_rerun()
+                    st.rerun()
 
             # --- Brisanje člana (SAFE: jedinstveni key-evi) ---
             st.markdown("---")
@@ -542,7 +556,7 @@ elif page == "📅 Prisustvo":
                 )
             st.success(f"Spremljeno prisutnih: {len(rows)}")
 
-    # Zadnjih 200 zapisa – SIGURAN upit (bez ORDER BY aliasa) + fallback ako je baza svježe prazna
+    # Zadnjih 200 zapisa – SIGURAN upit
     st.divider()
     st.subheader("📈 Zadnjih 200")
 
@@ -562,14 +576,158 @@ elif page == "📅 Prisustvo":
     try:
         df_last = df_from_sql(q)
     except Exception:
-        # Ako si radio reset baze — osiguraj shemu i prikaži prazno ako treba
         init_db()
-        try:
-            df_last = df_from_sql(q)
-        except Exception:
-            df_last = pd.DataFrame(columns=["datum", "termin", "clan", "grupa", "trajanje_min"])
-
+        df_last = df_from_sql(q)
     st.dataframe(df_last, use_container_width=True)
+
+# ----------------------- 📘 Prisustvo trenera -----------------------
+elif page == "📘 Prisustvo trenera":
+    st.subheader("📘 Evidencija prisustva trenera")
+
+    # Učitamo trenere
+    dft = df_from_sql("SELECT id, ime, prezime FROM trainers ORDER BY prezime, ime")
+    if dft.empty:
+        st.info("Nema trenera u bazi. Dodaj trenera u odjeljku 🏋️ Treneri.")
+    else:
+        trener_map = {f"{r['prezime']} {r['ime']}": int(r["id"]) for _, r in dft.iterrows()}
+        trener_label = st.selectbox("Trener", list(trener_map.keys()))
+        trener_id = trener_map[trener_label]
+
+        datum = st.date_input("Datum treninga", value=date.today())
+
+        # Grupe preuzimamo iz članova (ako nema, ručno)
+        df_groups = df_from_sql(
+            "SELECT DISTINCT grupa_trening FROM members WHERE grupa_trening IS NOT NULL AND grupa_trening<>'' ORDER BY 1"
+        )
+        grupe = df_groups["grupa_trening"].dropna().astype(str).tolist()
+        grupa_sel = st.selectbox("Grupa", grupe + ["(upiši ručno)"]) if grupe else "(upiši ručno)"
+        if grupa_sel == "(upiši ručno)":
+            grupa = st.text_input("Upiši grupu (npr. U13)", value="")
+        else:
+            grupa = grupa_sel
+
+        c1, c2 = st.columns(2)
+        with c1:
+            t_od = st.time_input("Vrijeme od", value=None, step=300)
+        with c2:
+            t_do = st.time_input("Vrijeme do", value=None, step=300)
+
+        napomena = st.text_input("Napomena (opcionalno)", value="")
+
+        def _mins(t1, t2):
+            if t1 is None or t2 is None:
+                return None
+            from datetime import datetime as dt
+            d1 = dt.combine(date.today(), t1)
+            d2 = dt.combine(date.today(), t2)
+            if d2 < d1:
+                return None
+            return int((d2 - d1).total_seconds() // 60)
+
+        trajanje_min = _mins(t_od, t_do)
+        if trajanje_min is not None:
+            st.caption(f"Trajanje: **{trajanje_min} min** (~ {trajanje_min/60:.2f} h)")
+
+        if st.button("💾 Spremi prisustvo trenera", type="primary", disabled=(trajanje_min is None or not grupa.strip())):
+            try:
+                exec_sql(
+                    """
+                    INSERT INTO trainer_attendance (trainer_id, datum, grupa, vrijeme_od, vrijeme_do, trajanje_min, napomena)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        int(trener_id),
+                        str(datum),
+                        grupa.strip(),
+                        (t_od.strftime("%H:%M") if t_od else None),
+                        (t_do.strftime("%H:%M") if t_do else None),
+                        int(trajanje_min) if trajanje_min is not None else None,
+                        napomena.strip(),
+                    ),
+                )
+                st.success("✅ Prisustvo trenera spremljeno.")
+            except Exception as e:
+                st.error(f"Greška pri spremanju: {e}")
+
+    st.markdown("---")
+    st.subheader("📊 Pregled po mjesecu")
+
+    from datetime import datetime as _dt
+    _today = _dt.today()
+    colm1, colm2, colm3 = st.columns(3)
+    with colm1:
+        year = st.number_input("Godina", min_value=2000, max_value=2100, value=_today.year, step=1)
+    with colm2:
+        month = st.number_input("Mjesec", min_value=1, max_value=12, value=_today.month, step=1)
+    with colm3:
+        trener_filter = st.selectbox("Trener (filter)", ["(svi)"] + (list(trener_map.keys()) if not dft.empty else []))
+
+    ym = f"{int(year)}-{int(month):02d}"
+    sql = """
+        SELECT
+            ta.id,
+            ta.datum,
+            ta.grupa,
+            ta.vrijeme_od,
+            ta.vrijeme_do,
+            ta.trajanje_min,
+            t.prezime || ' ' || t.ime AS trener
+        FROM trainer_attendance ta
+        JOIN trainers t ON t.id = ta.trainer_id
+        WHERE strftime('%Y-%m', ta.datum) = ?
+    """
+    params = [ym]
+    if trener_filter != "(svi)":
+        sql += " AND ta.trainer_id = ?"
+        params.append(trener_map[trener_filter])
+    sql += " ORDER BY ta.datum ASC, trener ASC, ta.vrijeme_od ASC"
+
+    try:
+        df_att = df_from_sql(sql, tuple(params))
+    except Exception:
+        init_db()
+        df_att = df_from_sql(sql, tuple(params))
+
+    if df_att.empty:
+        st.info("Nema zapisa za odabrani mjesec/trenera.")
+    else:
+        df_att["sati"] = df_att["trajanje_min"].fillna(0) / 60.0
+        st.write("✅ Detalji (po zapisima):")
+        st.dataframe(df_att, use_container_width=True)
+
+        sum_trener = (
+            df_att.groupby("trener", as_index=False)["trajanje_min"]
+            .sum()
+            .rename(columns={"trajanje_min": "minuta"})
+        )
+        sum_trener["sati"] = (sum_trener["minuta"] / 60.0).round(2)
+
+        sum_dan = (
+            df_att.groupby("datum", as_index=False)["trajanje_min"]
+            .sum()
+            .rename(columns={"trajanje_min": "minuta"})
+        )
+        sum_dan["sati"] = (sum_dan["minuta"] / 60.0).round(2)
+
+        st.markdown("**Sažetak po treneru (mjesec):**")
+        st.dataframe(sum_trener, use_container_width=True)
+
+        st.markdown("**Sažetak po danu (mjesec):**")
+        st.dataframe(sum_dan, use_container_width=True)
+
+        # Izvoz u Excel
+        from io import BytesIO
+        bio = BytesIO()
+        with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+            df_att.to_excel(writer, index=False, sheet_name="Zapisi")
+            sum_trener.to_excel(writer, index=False, sheet_name="Sažetak_trener")
+            sum_dan.to_excel(writer, index=False, sheet_name="Sažetak_dan")
+        st.download_button(
+            "⬇️ Izvoz (mjesec)",
+            data=bio.getvalue(),
+            file_name=f"prisustvo_trenera_{ym}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
 # ----------------------- 🏋️ Treneri -----------------------
 elif page == "🏋️ Treneri":
@@ -654,7 +812,7 @@ elif page == "🏋️ Treneri":
                         (ime.strip(), prezime.strip(), str(datum_rod), oib.strip(), osobna.strip(), iban.strip(), telefon.strip(), email.strip(), foto_path, ugovor_path, napomena.strip(), int(r["id"])),
                     )
                     st.success("✅ Izmjene spremljene.")
-                    st.experimental_rerun()
+                    st.rerun()
 
             # Brisanje trenera
             st.markdown("---")
@@ -668,7 +826,7 @@ elif page == "🏋️ Treneri":
                 if st.button("🗑️ Obriši ovog trenera", disabled=not confirm_tr, type="primary", key="trainer_delete_btn"):
                     if delete_trainer(int(r["id"]), delete_files=del_files):
                         st.success(f"Trener {r['prezime']} {r['ime']} obrisan.")
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.error("Brisanje nije uspjelo.")
 
@@ -782,6 +940,7 @@ else:
             DELETE FROM competitions;
             DELETE FROM members;
             DELETE FROM trainers;
+            DELETE FROM trainer_attendance;
             DELETE FROM club_documents;
 
             UPDATE club_info
@@ -795,5 +954,6 @@ else:
             st.success("✅ Svi podaci su obrisani. Struktura tablica je ostala.")
         except Exception as e:
             st.error(f"Greška pri brisanju: {e}")
+
 
 
