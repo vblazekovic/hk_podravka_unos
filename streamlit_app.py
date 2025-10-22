@@ -500,19 +500,26 @@ elif page == "👤 Članovi":
 # ----------------------- 📅 Prisustvo -----------------------
 elif page == "📅 Prisustvo":
     st.subheader("📅 Evidencija prisustva")
+
+    # Odabir datuma i termina
     d = st.date_input("Datum", value=date.today())
     termin_sel = st.selectbox("Termin", ["18:30-20:00", "20:00-22:00", "Upiši ručno…"])
     termin = st.text_input("Termin (npr. 09:00-10:30)") if termin_sel == "Upiši ručno…" else termin_sel
 
-    df_groups = df_from_sql("SELECT DISTINCT grupa_trening FROM members WHERE grupa_trening IS NOT NULL AND grupa_trening<>'' ORDER BY 1")
+    # Grupe iz baze
+    df_groups = df_from_sql(
+        "SELECT DISTINCT grupa_trening FROM members WHERE grupa_trening IS NOT NULL AND grupa_trening<>'' ORDER BY 1"
+    )
     grupe = df_groups["grupa_trening"].dropna().astype(str).tolist()
     grupa = st.selectbox("Grupa", ["(sve)"] + grupe)
 
+    # Popis članova za označavanje prisutnih
     if grupa == "(sve)":
         dfm = df_from_sql("SELECT id, ime, prezime, grupa_trening FROM members ORDER BY prezime, ime")
     else:
         dfm = df_from_sql(
-            "SELECT id, ime, prezime, grupa_trening FROM members WHERE grupa_trening=? ORDER BY prezime, ime", (grupa,)
+            "SELECT id, ime, prezime, grupa_trening FROM members WHERE grupa_trening=? ORDER BY prezime, ime",
+            (grupa,),
         )
 
     if dfm.empty:
@@ -521,9 +528,13 @@ elif page == "📅 Prisustvo":
         ids = dfm["id"].tolist()
         labels = dfm.apply(lambda rr: f"{rr['prezime']} {rr['ime']} ({rr.get('grupa_trening','')})", axis=1).tolist()
         checked = st.multiselect("Označi prisutne", options=ids, format_func=lambda mid: labels[ids.index(mid)])
+
         trajanje = st.number_input("Trajanje treninga (minute)", 30, 180, 90, 5)
         if st.button("💾 Spremi prisustvo"):
-            rows = [(int(mid), str(d), termin.strip(), "" if grupa == "(sve)" else grupa, 1, int(trajanje)) for mid in checked]
+            rows = [
+                (int(mid), str(d), termin.strip(), "" if grupa == "(sve)" else grupa, 1, int(trajanje))
+                for mid in checked
+            ]
             if rows:
                 exec_many(
                     "INSERT INTO attendance (member_id, datum, termin, grupa, prisutan, trajanje_min) VALUES (?, ?, ?, ?, ?, ?)",
@@ -531,15 +542,34 @@ elif page == "📅 Prisustvo":
                 )
             st.success(f"Spremljeno prisutnih: {len(rows)}")
 
+    # Zadnjih 200 zapisa – SIGURAN upit (bez ORDER BY aliasa) + fallback ako je baza svježe prazna
     st.divider()
     st.subheader("📈 Zadnjih 200")
+
     q = """
-        SELECT a.datum, a.termin, m.prezime || ' ' || m.ime AS clan, COALESCE(a.grupa, m.grupa_trening) AS grupa, a.trajanje_min
-        FROM attendance a JOIN members m ON m.id=a.member_id
-        ORDER BY a.datum DESC, clan
+        SELECT
+            a.datum,
+            a.termin,
+            m.prezime || ' ' || m.ime AS clan,
+            COALESCE(a.grupa, m.grupa_trening) AS grupa,
+            a.trajanje_min
+        FROM attendance AS a
+        JOIN members   AS m ON m.id = a.member_id
+        ORDER BY a.datum DESC, m.prezime ASC, m.ime ASC
         LIMIT 200
     """
-    st.dataframe(df_from_sql(q), use_container_width=True)
+
+    try:
+        df_last = df_from_sql(q)
+    except Exception:
+        # Ako si radio reset baze — osiguraj shemu i prikaži prazno ako treba
+        init_db()
+        try:
+            df_last = df_from_sql(q)
+        except Exception:
+            df_last = pd.DataFrame(columns=["datum", "termin", "clan", "grupa", "trajanje_min"])
+
+    st.dataframe(df_last, use_container_width=True)
 
 # ----------------------- 🏋️ Treneri -----------------------
 elif page == "🏋️ Treneri":
