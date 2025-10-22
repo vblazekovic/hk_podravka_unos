@@ -189,6 +189,26 @@ def save_uploads(files, folder: str) -> list:
     saved = []
     if not files:
         return saved
+        # -------------------- brisanje članova --------------------
+def delete_member(member_id: int, delete_photo: bool = True):
+    """Obriši člana + (opcionalno) njegovu fotografiju s diska.
+    Attendance zapisi se brišu automatski (FK ON DELETE CASCADE)."""
+    try:
+        # nađi foto putanju
+        dfp = df_from_sql("SELECT foto_path FROM members WHERE id=?", (member_id,))
+        if delete_photo and not dfp.empty:
+            fp = str(dfp.iloc[0]["foto_path"] or "").strip()
+            if fp and os.path.isfile(fp):
+                try:
+                    os.remove(fp)
+                except Exception:
+                    pass  # ne ruši ako ne može obrisati fajl
+
+        # obriši člana
+        exec_sql("DELETE FROM members WHERE id=?", (member_id,))
+        return True
+    except Exception:
+        return False
     dest_dir = os.path.join(UPLOAD_ROOT, folder)
     os.makedirs(dest_dir, exist_ok=True)
     for f in files:
