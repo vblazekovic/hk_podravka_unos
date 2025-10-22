@@ -852,7 +852,7 @@ elif page == "👤 Članovi":
             st.dataframe(df.head(20), use_container_width=True)
 
             def find_col(df, target_names: List[str]):
-                lower_map = {c.strip().lower(): c for c in df.columns}
+                lower_map = {str(c).strip().lower(): c for c in df.columns}
                 for name in target_names:
                     key = name.strip().lower()
                     if key in lower_map:
