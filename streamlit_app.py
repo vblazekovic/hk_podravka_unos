@@ -486,7 +486,7 @@ elif page == "👤 Članovi":
                     ok = delete_member(int(r["id"]), delete_photo=del_photo)
                     if ok:
                         st.success(f"Član {r['prezime']} {r['ime']} obrisan.")
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.error("Brisanje nije uspjelo.")
 
