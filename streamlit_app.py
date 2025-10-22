@@ -778,8 +778,9 @@ elif page == "👤 Članovi":
                 with c2:
                     init_god = int(pd.to_numeric(r.get("godina_rodjenja"), errors="coerce")) if pd.notna(pd.to_numeric(r.get("godina_rodjenja"), errors="coerce")) else 2010
 godina_rod = st.number_input("Godina rođenja", 1900, 2100, init_god, 1)
-                    email_s = st.text_input("E-mail sportaša", value=str(r["email_sportas"] or ""))
-                    email_r = st.text_input("E-mail roditelja", value=str(r["email_roditelj"] or ""))
+                        godina_rod = st.number_input("Godina rođenja", min_value=1900, max_value=2100, value=init_god, step=1)
+                        email_s = st.text_input("E-mail sportaša", value=str(r["email_sportas"] or ""))
+                        email_r = st.text_input("E-mail roditelja", value=str(r["email_roditelj"] or ""))
                 with c3:
                     tel_s = st.text_input("Kontakt sportaša", value=str(r["telefon_sportas"] or ""))
                     tel_r = st.text_input("Kontakt roditelja", value=str(r["telefon_roditelj"] or ""))
