@@ -361,88 +361,50 @@ def delete_veteran(veteran_id: int, delete_files: bool = True) -> bool:
 def df_mobile(df: pd.DataFrame, height: int = 420):
     st.dataframe(df, use_container_width=True, height=height)
 
+
 # ---------------------------------- Safe date helper ----------------------------------
 from datetime import datetime as _dt_internal, date as _date_internal
 import pandas as _pd_internal
+import numpy as _np_internal
 
 def safe_date(val, default: _date_internal = _date_internal(2010, 1, 1)) -> _date_internal:
     """
     Sigurna konverzija vrijednosti u datetime.date.
-    Podržava None, '', 'NaT', pandas.NaT, Timestamp, string itd.
+    Podržava: None, '', 'NaT', 'nan', 'None', pandas.NaT, numpy.nan,
+    Timestamp/Datetime, string, pa čak i list/Series (uzima prvu vrijednost).
     Ako konverzija ne uspije, vraća default.
     """
     try:
-        # Ako je već čisti date (ali ne datetime)
+        # Ako je list/tuple/Series -> uzmi prvu konkretnu vrijednost
+        if isinstance(val, (list, tuple)):
+            val = val[0] if val else None
+        try:
+            # pandas Series ili numpy array
+            if hasattr(val, "iloc"):
+                val = val.iloc[0] if len(val) else None
+            elif isinstance(val, _np_internal.ndarray):
+                val = val[0] if val.size else None
+        except Exception:
+            pass
+
+        # Normaliziraj "string NaT/None/nan"
+        if isinstance(val, str) and val.strip().lower() in {"nat", "nan", "none", ""}:
+            val = None
+
+        # Ako je već čisti date (ne datetime)
         if isinstance(val, _date_internal) and not isinstance(val, _dt_internal):
             return val
+
         ts = _pd_internal.to_datetime(val, errors="coerce")
         if _pd_internal.isna(ts):
             return default
+        # Ako je numpy datetime64 bez tz -> u date
+        if not isinstance(ts, _dt_internal):
+            ts = _pd_internal.Timestamp(ts).to_pydatetime()
         return ts.date()
     except Exception:
         return default
 
-
-# ---------------------------------- Excel import/export ----------------------------------
-# Dozvoljene kolone po tablici (radi sigurnog uvoza bez ID/created_at kolona)
-ALLOWED_COLS = {
-    "members": [
-        "ime", "prezime", "datum_rodjenja", "godina_rodjenja", "email_sportas", "email_roditelj",
-        "telefon_sportas", "telefon_roditelj", "clanski_broj", "oib", "adresa", "grupa_trening", "foto_path"
-    ],
-    "trainers": [
-        "ime", "prezime", "datum_rodjenja", "oib", "osobna_broj", "iban", "telefon", "email", "foto_path", "ugovor_path", "napomena"
-    ],
-    "veterans": [
-        "ime", "prezime", "datum_rodjenja", "oib", "osobna_broj", "telefon", "email", "foto_path", "ugovor_path", "napomena"
-    ],
-    "attendance": [
-        "member_id", "datum", "termin", "grupa", "prisutan", "trajanje_min"
-    ],
-}
-
-def _normalize_dates(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
-    for c in cols:
-        if c in df.columns:
-            try:
-                df[c] = pd.to_datetime(df[c]).dt.date.astype(str)
-            except Exception:
-                df[c] = df[c].astype(str)
-    return df
-
-def export_table_to_excel(table_name: str, use_allowed_cols: bool = False) -> bytes:
-    """Vrati tablicu kao Excel bajtove za preuzimanje."""
-    if use_allowed_cols and table_name in ALLOWED_COLS:
-        cols = ", ".join(ALLOWED_COLS[table_name])
-        q = f"SELECT {cols} FROM {table_name}"
-    else:
-        q = f"SELECT * FROM {table_name}"
-    df = df_from_sql(q)
-    # Normaliziraj datume za čitljivost
-    if table_name == "members":
-        df = _normalize_dates(df, ["datum_rodjenja"])
-    elif table_name == "trainers":
-        df = _normalize_dates(df, ["datum_rodjenja"])
-    elif table_name == "veterans":
-        df = _normalize_dates(df, ["datum_rodjenja"])
-    elif table_name == "attendance":
-        df = _normalize_dates(df, ["datum"])
-    bio = BytesIO()
-    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name=table_name)
-    return bio.getvalue()
-
-def _cast_types_for_table(table: str, df: pd.DataFrame) -> pd.DataFrame:
-    """Meka konverzija tipova po tablici (sprječava pad uvoza)."""
-    dfx = df.copy()
-    if table == "attendance":
-        for c in ["member_id", "prisutan", "trajanje_min"]:
-            if c in dfx.columns:
-                dfx[c] = pd.to_numeric(dfx[c], errors="coerce").astype("Int64")
-        dfx = _normalize_dates(dfx, ["datum"])
-    else:
-        dfx = _normalize_dates(dfx, ["datum_rodjenja"])
-    return dfx
 
 def import_table_from_excel(file, table_name: str) -> Tuple[int, List[str]]:
     """
