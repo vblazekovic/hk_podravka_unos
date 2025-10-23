@@ -1,16 +1,18 @@
 
-# streamlit_app.py — HK Podravka • Sustav (prazan)
+# streamlit_app.py — HK Podravka • Sustav (s uvoz/izvoz Excel)
 # Moduli: Natjecanja + Rezultati + Članovi + Prisustvo + Prisustvo trenera + Treneri + Veterani + Obavijesti + Klub + Dijagnostika
 # Dodano: responzivni CSS, e-mail obavijesti (SIMULACIJA), WhatsApp linkovi, SMS (Twilio), brisanje zapisa, uploadi
+#         + Uvoz/Izvoz Excel (Članovi, Treneri, Veterani, Prisustvo) + Prazni predlošci za preuzimanje
 
 import io
 import os
 import json
 import sqlite3
+from io import BytesIO
 from urllib.parse import quote_plus
 
 from datetime import datetime, date
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -118,7 +120,6 @@ def save_upload(file, subfolder: str) -> Optional[str]:
 # ---------- Messaging helpers ----------
 def simulate_email(to_list: List[str], subject: str, body: str) -> tuple[bool, str]:
     """Simuliraj slanje e-maila (ne šalje se stvarno)."""
-    # samo prikaži u aplikaciji kome bi bilo poslano
     if not to_list:
         return False, "Nema primatelja."
     return True, f"SIMULACIJA — e-mail bi bio poslan na: {', '.join(sorted(set(to_list)))}"
@@ -366,8 +367,112 @@ def delete_veteran(veteran_id: int, delete_files: bool = True) -> bool:
 def df_mobile(df: pd.DataFrame, height: int = 420):
     st.dataframe(df, use_container_width=True, height=height)
 
+# ---------------------------------- Excel import/export ----------------------------------
+# Dozvoljene kolone po tablici (radi sigurnog uvoza bez ID/created_at kolona)
+ALLOWED_COLS = {
+    "members": [
+        "ime", "prezime", "datum_rodjenja", "godina_rodjenja", "email_sportas", "email_roditelj",
+        "telefon_sportas", "telefon_roditelj", "clanski_broj", "oib", "adresa", "grupa_trening", "foto_path"
+    ],
+    "trainers": [
+        "ime", "prezime", "datum_rodjenja", "oib", "osobna_broj", "iban", "telefon", "email", "foto_path", "ugovor_path", "napomena"
+    ],
+    "veterans": [
+        "ime", "prezime", "datum_rodjenja", "oib", "osobna_broj", "telefon", "email", "foto_path", "ugovor_path", "napomena"
+    ],
+    "attendance": [
+        "member_id", "datum", "termin", "grupa", "prisutan", "trajanje_min"
+    ],
+}
+
+def _normalize_dates(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
+    for c in cols:
+        if c in df.columns:
+            try:
+                df[c] = pd.to_datetime(df[c]).dt.date.astype(str)
+            except Exception:
+                df[c] = df[c].astype(str)
+    return df
+
+def export_table_to_excel(table_name: str, use_allowed_cols: bool = False) -> bytes:
+    """Vrati tablicu kao Excel bajtove za preuzimanje."""
+    if use_allowed_cols and table_name in ALLOWED_COLS:
+        cols = ", ".join(ALLOWED_COLS[table_name])
+        q = f"SELECT {cols} FROM {table_name}"
+    else:
+        q = f"SELECT * FROM {table_name}"
+    df = df_from_sql(q)
+    # Normaliziraj datume za čitljivost
+    if table_name == "members":
+        df = _normalize_dates(df, ["datum_rodjenja"])
+    elif table_name == "trainers":
+        df = _normalize_dates(df, ["datum_rodjenja"])
+    elif table_name == "veterans":
+        df = _normalize_dates(df, ["datum_rodjenja"])
+    elif table_name == "attendance":
+        df = _normalize_dates(df, ["datum"])
+    bio = BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=table_name)
+    return bio.getvalue()
+
+def _cast_types_for_table(table: str, df: pd.DataFrame) -> pd.DataFrame:
+    """Meka konverzija tipova po tablici (sprječava pad uvoza)."""
+    dfx = df.copy()
+    if table == "attendance":
+        for c in ["member_id", "prisutan", "trajanje_min"]:
+            if c in dfx.columns:
+                dfx[c] = pd.to_numeric(dfx[c], errors="coerce").astype("Int64")
+        dfx = _normalize_dates(dfx, ["datum"])
+    else:
+        dfx = _normalize_dates(dfx, ["datum_rodjenja"])
+    return dfx
+
+def import_table_from_excel(file, table_name: str) -> Tuple[int, List[str]]:
+    """
+    Uvezi podatke iz Excel datoteke u postojeću tablicu (append).
+    Vraća: (broj_uvezenih_redova, lista_upozorenja)
+    """
+    try:
+        df_new = pd.read_excel(file)
+    except Exception as e:
+        raise ValueError(f"Ne mogu pročitati Excel: {e}")
+
+    if table_name not in ALLOWED_COLS:
+        raise ValueError("Uvoz nije podržan za ovu tablicu.")
+
+    allowed = ALLOWED_COLS[table_name]
+    orig_cols = list(df_new.columns)
+    # Zadrži samo dopuštene kolone
+    keep = [c for c in orig_cols if c in allowed]
+    dropped = [c for c in orig_cols if c not in allowed]
+    df_new = df_new[keep].copy()
+
+    # Konverzija tipova
+    df_new = _cast_types_for_table(table_name, df_new)
+
+    # Umetni u bazu
+    conn = get_conn()
+    try:
+        df_new.to_sql(table_name, conn, if_exists="append", index=False)
+    finally:
+        conn.close()
+
+    warnings = []
+    if dropped:
+        warnings.append(f"Izostavljene kolone (nisu podržane): {', '.join(dropped)}")
+    return len(df_new), warnings
+
+def empty_template_excel(columns: List[str], filename: str) -> Tuple[bytes, str]:
+    """Vrati (bajtove, mime) za prazan predložak s traženim kolonama."""
+    df = pd.DataFrame(columns=columns)
+    bio = BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="predlozak")
+    return bio.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
 # ---------------------------------- UI ---------------------------------------
-st.title("🥇 HK Podravka — Sustav (prazan)")
+st.title("🥇 HK Podravka — Sustav")
 
 page = st.sidebar.radio(
     "Navigacija",
@@ -515,7 +620,7 @@ elif page == "🧾 Rezultati":
 
 # ----------------------- 👤 Članovi -----------------------
 elif page == "👤 Članovi":
-    tab_add, tab_edit, tab_list = st.tabs(["➕ Dodaj", "🛠 Uredi/obriši", "📋 Popis & izvoz"])
+    tab_add, tab_edit, tab_list = st.tabs(["➕ Dodaj", "🛠 Uredi/obriši", "📋 Popis & izvoz/uvoz"])
 
     # ➕ Dodaj
     with tab_add:
@@ -640,6 +745,36 @@ elif page == "👤 Članovi":
         )
         df_mobile(dfm)
 
+        st.markdown("### 📤 Izvoz / 📥 Uvoz — Članovi")
+        # Izvoz samo dozvoljenih kolona (čisto)
+        data_x = export_table_to_excel("members", use_allowed_cols=True)
+        st.download_button(
+            "⬇️ Preuzmi članove (Excel)",
+            data=data_x,
+            file_name="clanovi.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+        upl = st.file_uploader("📥 Uvezi članove iz Excel tablice (.xlsx)", type=["xlsx"], key="upl_members")
+        if upl:
+            try:
+                n, warns = import_table_from_excel(upl, "members")
+                st.success(f"✅ Uvezeno {n} članova.")
+                for w in warns:
+                    st.info(w)
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Uvoz nije uspio: {e}")
+
+        # Prazan predložak
+        bytes_tpl, mime = empty_template_excel(ALLOWED_COLS["members"], "predlozak_clanovi.xlsx")
+        st.download_button(
+            "⬇️ Preuzmi Prazan Predložak (Članovi)",
+            data=bytes_tpl,
+            file_name="predlozak_clanovi.xlsx",
+            mime=mime
+        )
+
 # ----------------------- 📅 Prisustvo -----------------------
 elif page == "📅 Prisustvo":
     st.subheader("📅 Evidencija prisustva")
@@ -689,6 +824,36 @@ elif page == "📅 Prisustvo":
     except Exception:
         init_db(); df_last = df_from_sql(q)
     df_mobile(df_last)
+
+    # Uvoz/izvoz prisustva + predložak
+    st.markdown("---")
+    st.markdown("### 📤 Izvoz / 📥 Uvoz — Prisustvo")
+    data_x = export_table_to_excel("attendance", use_allowed_cols=True)
+    st.download_button(
+        "⬇️ Preuzmi prisustvo (Excel)",
+        data=data_x,
+        file_name="prisustvo.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+    upl = st.file_uploader("📥 Uvezi prisustvo iz Excel tablice (.xlsx)", type=["xlsx"], key="upl_attendance")
+    if upl:
+        try:
+            n, warns = import_table_from_excel(upl, "attendance")
+            st.success(f"✅ Uvezeno {n} zapisa prisustva.")
+            for w in warns:
+                st.info(w)
+            st.rerun()
+        except Exception as e:
+            st.error(f"❌ Uvoz nije uspio: {e}")
+
+    bytes_tpl, mime = empty_template_excel(ALLOWED_COLS["attendance"], "predlozak_prisustvo.xlsx")
+    st.download_button(
+        "⬇️ Preuzmi Prazan Predložak (Prisustvo)",
+        data=bytes_tpl,
+        file_name="predlozak_prisustvo.xlsx",
+        mime=mime
+    )
 
 # ----------------------- 📘 Prisustvo trenera -----------------------
 elif page == "📘 Prisustvo trenera":
@@ -785,7 +950,6 @@ elif page == "📘 Prisustvo trenera":
         st.markdown("**Sažetak po treneru (mjesec):**"); df_mobile(sum_trener, height=280)
         st.markdown("**Sažetak po danu (mjesec):**"); df_mobile(sum_dan, height=280)
 
-        from io import BytesIO
         bio = BytesIO()
         with pd.ExcelWriter(bio, engine="openpyxl") as writer:
             df_att.to_excel(writer, index=False, sheet_name="Zapisi")
@@ -796,7 +960,7 @@ elif page == "📘 Prisustvo trenera":
 
 # ----------------------- 🏋️ Treneri -----------------------
 elif page == "🏋️ Treneri":
-    tab_add, tab_edit, tab_list = st.tabs(["➕ Dodaj trenera", "🛠 Uredi/obriši", "📋 Popis & izvoz"])
+    tab_add, tab_edit, tab_list = st.tabs(["➕ Dodaj trenera", "🛠 Uredi/obriši", "📋 Popis & izvoz/uvoz"])
     with tab_add:
         with st.form("frm_trainer_add"):
             c1, c2, c3 = st.columns(3)
@@ -884,12 +1048,40 @@ elif page == "🏋️ Treneri":
                         st.error("Brisanje nije uspjelo.")
 
     with tab_list:
-        dft = df_from_sql("SELECT ime, prezime, datum_rodjenja, osobna_broj, iban, telefon, email, oib, foto_path, ugovor_path FROM trainers ORDER BY prezime, ime")
+        dft = df_from_sql("SELECT ime, prezime, datum_rodjenja, osobna_broj, iban, telefon, email, oib, foto_path, ugovor_path, napomena FROM trainers ORDER BY prezime, ime")
         df_mobile(dft)
+
+        st.markdown("### 📤 Izvoz / 📥 Uvoz — Treneri")
+        data_x = export_table_to_excel("trainers", use_allowed_cols=True)
+        st.download_button(
+            "⬇️ Preuzmi trenere (Excel)",
+            data=data_x,
+            file_name="treneri.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+        upl = st.file_uploader("📥 Uvezi trenere iz Excel tablice (.xlsx)", type=["xlsx"], key="upl_trainers")
+        if upl:
+            try:
+                n, warns = import_table_from_excel(upl, "trainers")
+                st.success(f"✅ Uvezeno {n} trenera.")
+                for w in warns:
+                    st.info(w)
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Uvoz nije uspio: {e}")
+
+        bytes_tpl, mime = empty_template_excel(ALLOWED_COLS["trainers"], "predlozak_treneri.xlsx")
+        st.download_button(
+            "⬇️ Preuzmi Prazan Predložak (Treneri)",
+            data=bytes_tpl,
+            file_name="predlozak_treneri.xlsx",
+            mime=mime
+        )
 
 # ----------------------- 🎖️ Veterani -----------------------
 elif page == "🎖️ Veterani":
-    tab_add, tab_edit, tab_list = st.tabs(["➕ Dodaj veterana", "🛠 Uredi/obriši", "📋 Popis & izvoz"])
+    tab_add, tab_edit, tab_list = st.tabs(["➕ Dodaj veterana", "🛠 Uredi/obriši", "📋 Popis & izvoz/uvoz"])
 
     with tab_add:
         with st.form("frm_veteran_add"):
@@ -990,9 +1182,37 @@ elif page == "🎖️ Veterani":
 
     with tab_list:
         dfv = df_from_sql(
-            "SELECT ime, prezime, datum_rodjenja, osobna_broj, telefon, email, oib, foto_path, ugovor_path FROM veterans ORDER BY prezime, ime"
+            "SELECT ime, prezime, datum_rodjenja, osobna_broj, telefon, email, oib, foto_path, ugovor_path, napomena FROM veterans ORDER BY prezime, ime"
         )
         df_mobile(dfv)
+
+        st.markdown("### 📤 Izvoz / 📥 Uvoz — Veterani")
+        data_x = export_table_to_excel("veterans", use_allowed_cols=True)
+        st.download_button(
+            "⬇️ Preuzmi veterane (Excel)",
+            data=data_x,
+            file_name="veterani.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+        upl = st.file_uploader("📥 Uvezi veterane iz Excel tablice (.xlsx)", type=["xlsx"], key="upl_veterans")
+        if upl:
+            try:
+                n, warns = import_table_from_excel(upl, "veterans")
+                st.success(f"✅ Uvezeno {n} veterana.")
+                for w in warns:
+                    st.info(w)
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Uvoz nije uspio: {e}")
+
+        bytes_tpl, mime = empty_template_excel(ALLOWED_COLS["veterans"], "predlozak_veterani.xlsx")
+        st.download_button(
+            "⬇️ Preuzmi Prazan Predložak (Veterani)",
+            data=bytes_tpl,
+            file_name="predlozak_veterani.xlsx",
+            mime=mime
+        )
 
 # ----------------------- 📣 Obavijesti -----------------------
 elif page == "📣 Obavijesti":
@@ -1233,4 +1453,3 @@ else:
             st.success("✅ Svi podaci su obrisani. Struktura tablica je ostala.")
         except Exception as e:
             st.error(f"Greška pri brisanju: {e}")
-
