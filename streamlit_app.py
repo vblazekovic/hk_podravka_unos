@@ -426,7 +426,7 @@ if page == "➕ Natjecanja":
                 """,
                 (
                     rb, int(godina), str(datum), str(datum_kraj), natjecanje.strip(), ime_natjecanja.strip(), stil.strip(),
-                    mjesto.strip(), drzava.strip(), kratica.strip(), int(nastupilo), ekipno.strip(), tren er.strip(),
+                    mjesto.strip(), drzava.strip(), kratica.strip(), int(nastupilo), ekipno.strip(), trener.strip(),
                     napomena.strip(), link_rez.strip(), None, vijest.strip(),
                 ),
             )
