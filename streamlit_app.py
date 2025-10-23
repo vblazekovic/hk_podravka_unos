@@ -1,9 +1,3 @@
-
-# streamlit_app.py — HK Podravka • Sustav (s uvoz/izvoz Excel)
-# Moduli: Natjecanja + Rezultati + Članovi + Prisustvo + Prisustvo trenera + Treneri + Veterani + Obavijesti + Klub + Dijagnostika
-# Dodano: responzivni CSS, e-mail obavijesti (SIMULACIJA), WhatsApp linkovi, SMS (Twilio), brisanje zapisa, uploadi
-#         + Uvoz/Izvoz Excel (Članovi, Treneri, Veterani, Prisustvo) + Prazni predlošci za preuzimanje
-
 import io
 import os
 import json
@@ -367,6 +361,28 @@ def delete_veteran(veteran_id: int, delete_files: bool = True) -> bool:
 def df_mobile(df: pd.DataFrame, height: int = 420):
     st.dataframe(df, use_container_width=True, height=height)
 
+# ---------------------------------- Safe date helper ----------------------------------
+from datetime import datetime as _dt_internal, date as _date_internal
+import pandas as _pd_internal
+
+def safe_date(val, default: _date_internal = _date_internal(2010, 1, 1)) -> _date_internal:
+    """
+    Sigurna konverzija vrijednosti u datetime.date.
+    Podržava None, '', 'NaT', pandas.NaT, Timestamp, string itd.
+    Ako konverzija ne uspije, vraća default.
+    """
+    try:
+        # Ako je već čisti date (ali ne datetime)
+        if isinstance(val, _date_internal) and not isinstance(val, _dt_internal):
+            return val
+        ts = _pd_internal.to_datetime(val, errors="coerce")
+        if _pd_internal.isna(ts):
+            return default
+        return ts.date()
+    except Exception:
+        return default
+
+
 # ---------------------------------- Excel import/export ----------------------------------
 # Dozvoljene kolone po tablici (radi sigurnog uvoza bez ID/created_at kolona)
 ALLOWED_COLS = {
@@ -577,7 +593,7 @@ elif page == "🧾 Rezultati":
         st.info("Prvo dodaj natjecanje.")
     else:
         comp_labels = dfc.apply(lambda rr: f"#{int(rr['redni_broj'])} — {rr['datum']} — {rr['ime_natjecanja'] or ''}", axis=1).tolist()
-        comp_map = {comp_labels[i]: int(dfc.iloc[i]["id"]) for i in range(len(comp_labels))}
+        comp_map = {comp_labels[i]: int(dfc.iloc[i]['id']) for i in range(len(comp_labels))}
         sel = st.selectbox("Natjecanje", comp_labels)
         competition_id = comp_map[sel]
 
@@ -680,10 +696,7 @@ elif page == "👤 Članovi":
                 with c1:
                     ime = st.text_input("Ime *", value=str(r["ime"] or ""))
                     prezime = st.text_input("Prezime *", value=str(r["prezime"] or ""))
-                    try:
-                        init_date = pd.to_datetime(r["datum_rodjenja"]).date() if r["datum_rodjenja"] else date(2010, 1, 1)
-                    except Exception:
-                        init_date = date(2010, 1, 1)
+                    init_date = safe_date(r.get("datum_rodjenja"), default=date(2010, 1, 1))
                     datum_rod = st.date_input("Datum rođenja", value=init_date)
                 with c2:
                     god_v = pd.to_numeric(r.get("godina_rodjenja"), errors="coerce")
@@ -1005,10 +1018,7 @@ elif page == "🏋️ Treneri":
                 with c1:
                     ime = st.text_input("Ime *", value=str(r["ime"] or ""))
                     prezime = st.text_input("Prezime *", value=str(r["prezime"] or ""))
-                    try:
-                        init_date = pd.to_datetime(r["datum_rodjenja"]).date() if r["datum_rodjenja"] else date(1990, 1, 1)
-                    except Exception:
-                        init_date = date(1990, 1, 1)
+                    init_date = safe_date(r.get("datum_rodjenja"), default=date(1990, 1, 1))
                     datum_rod = st.date_input("Datum rođenja", value=init_date)
                 with c2:
                     osobna = st.text_input("Broj osobne iskaznice", value=str(r["osobna_broj"] or ""))
@@ -1130,10 +1140,7 @@ elif page == "🎖️ Veterani":
                 with c1:
                     ime = st.text_input("Ime *", value=str(r["ime"] or ""))
                     prezime = st.text_input("Prezime *", value=str(r["prezime"] or ""))
-                    try:
-                        init_date = pd.to_datetime(r["datum_rodjenja"]).date() if r["datum_rodjenja"] else date(1980, 1, 1)
-                    except Exception:
-                        init_date = date(1980, 1, 1)
+                    init_date = safe_date(r.get("datum_rodjenja"), default=date(1980, 1, 1))
                     datum_rod = st.date_input("Datum rođenja", value=init_date)
                 with c2:
                     osobna = st.text_input("Broj osobne iskaznice", value=str(r["osobna_broj"] or ""))
@@ -1453,5 +1460,3 @@ else:
             st.success("✅ Svi podaci su obrisani. Struktura tablica je ostala.")
         except Exception as e:
             st.error(f"Greška pri brisanju: {e}")
-
-
