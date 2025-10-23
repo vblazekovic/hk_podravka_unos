@@ -1,15 +1,12 @@
 
 # streamlit_app.py — HK Podravka • Sustav (prazan)
-# Moduli: Natjecanja + Rezultati + Članovi + Prisustvo + Prisustvo trenera + Treneri + Obavijesti + Klub + Dijagnostika
-# Dodano: e-mail obavijesti (SMTP), WhatsApp linkovi, opcionalni SMS (Twilio), mobile-friendly CSS
+# Moduli: Natjecanja + Rezultati + Članovi + Prisustvo + Prisustvo trenera + Treneri + Veterani + Obavijesti + Klub + Dijagnostika
+# Dodano: responzivni CSS, e-mail obavijesti (SIMULACIJA), WhatsApp linkovi, SMS (Twilio), brisanje zapisa, uploadi
 
 import io
 import os
 import json
 import sqlite3
-import ssl
-import smtplib
-from email.mime.text import MIMEText
 from urllib.parse import quote_plus
 
 from datetime import datetime, date
@@ -52,19 +49,17 @@ UPLOADS = {
     "members": os.path.join(UPLOAD_ROOT, "members"),
     "competitions": os.path.join(UPLOAD_ROOT, "competitions"),
     "trainers": os.path.join(UPLOAD_ROOT, "trainers"),
+    "veterans": os.path.join(UPLOAD_ROOT, "veterans"),
     "club": os.path.join(UPLOAD_ROOT, "club"),
 }
 
-# --- Email/SMS konfiguracija ---
+# --- E-mail/SMS konfiguracija ---
 CLUB_EMAIL = "hsk.podravka@gmail.com"
 ADMIN_EMAIL = "vblazekovic76@gmail.com"
 
-SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 465
-SMTP_USER = CLUB_EMAIL
-SMTP_APP_PASSWORD = os.environ.get("SMTP_APP_PASSWORD")  # postavi u okruženju
+SEND_REAL_EMAILS = False  # 👈 po dogovoru: e-mail obavijesti su samo simulirane
 
-# Twilio (opcionalno)
+# Twilio (SMS)
 TWILIO_SID = os.environ.get("TWILIO_ACCOUNT_SID")
 TWILIO_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
 TWILIO_FROM = os.environ.get("TWILIO_FROM_NUMBER")  # npr. +123456789
@@ -121,22 +116,12 @@ def save_upload(file, subfolder: str) -> Optional[str]:
     return path
 
 # ---------- Messaging helpers ----------
-def _send_email_smtp(to_list: List[str], subject: str, body: str) -> tuple[bool, str]:
-    """Pošalji e-mail preko Gmail SMTP. Vraća (ok, msg)."""
-    if not SMTP_APP_PASSWORD:
-        return False, "SMTP_APP_PASSWORD nije postavljen u okruženju."
-    try:
-        msg = MIMEText(body, _charset="utf-8")
-        msg["Subject"] = subject
-        msg["From"] = SMTP_USER
-        msg["To"] = ", ".join(to_list)
-        context = ssl.create_default_context()
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=context) as server:
-            server.login(SMTP_USER, SMTP_APP_PASSWORD)
-            server.sendmail(SMTP_USER, to_list, msg.as_string())
-        return True, "E-mail poslan."
-    except Exception as e:
-        return False, f"Greška slanja e-maila: {e}"
+def simulate_email(to_list: List[str], subject: str, body: str) -> tuple[bool, str]:
+    """Simuliraj slanje e-maila (ne šalje se stvarno)."""
+    # samo prikaži u aplikaciji kome bi bilo poslano
+    if not to_list:
+        return False, "Nema primatelja."
+    return True, f"SIMULACIJA — e-mail bi bio poslan na: {', '.join(sorted(set(to_list)))}"
 
 def _format_hr_phone_to_e164(phone: str) -> Optional[str]:
     """Pokušaj pretvoriti HR broj u E.164. npr. 0912345678 -> +385912345678"""
@@ -147,7 +132,6 @@ def _format_hr_phone_to_e164(phone: str) -> Optional[str]:
         return p
     if p.startswith("0"):
         return "+385" + p[1:]
-    # ako je već bez nule i bez +385 (npr. 91...), dodaj +385
     if len(p) in (8, 9) and not p.startswith("385"):
         return "+385" + p
     if p.startswith("385"):
@@ -164,18 +148,14 @@ def _wa_link(phone: str, text: str) -> Optional[str]:
 def _send_sms_twilio(to_phone: str, text: str) -> tuple[bool, str]:
     """Pošalji SMS preko Twilio (ako je konfiguriran)."""
     if not (TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM):
-        return False, "Twilio nije konfiguriran (env varijable)."
+        return False, "Twilio nije konfiguriran (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER)."
     try:
         from twilio.rest import Client
         client = Client(TWILIO_SID, TWILIO_TOKEN)
         to_e164 = _format_hr_phone_to_e164(to_phone)
         if not to_e164:
             return False, "Neispravan broj primatelja."
-        message = client.messages.create(
-            body=text,
-            from_=TWILIO_FROM,
-            to=to_e164
-        )
+        message = client.messages.create(body=text, from_=TWILIO_FROM, to=to_e164)
         return True, f"SMS poslan (sid: {message.sid})."
     except Exception as e:
         return False, f"Greška slanja SMS-a: {e}"
@@ -286,6 +266,22 @@ def init_db():
         created_at TEXT DEFAULT (datetime('now'))
     );
 
+    -- VETERANI (kao treneri, ali bez IBAN-a)
+    CREATE TABLE IF NOT EXISTS veterans (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ime TEXT,
+        prezime TEXT,
+        datum_rodjenja TEXT,
+        oib TEXT,
+        osobna_broj TEXT,
+        telefon TEXT,
+        email TEXT,
+        foto_path TEXT,
+        ugovor_path TEXT,
+        napomena TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+    );
+
     -- KLUB
     CREATE TABLE IF NOT EXISTS club_info (
         id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -352,6 +348,21 @@ def delete_trainer(trainer_id: int, delete_files: bool = True) -> bool:
     except Exception:
         return False
 
+def delete_veteran(veteran_id: int, delete_files: bool = True) -> bool:
+    """Obriši veterana i (opcionalno) foto/ugovor datoteke."""
+    try:
+        dfp = df_from_sql("SELECT foto_path, ugovor_path FROM veterans WHERE id=?", (veteran_id,))
+        if delete_files and not dfp.empty:
+            for col in ("foto_path", "ugovor_path"):
+                fp = str(dfp.iloc[0][col] or "").strip()
+                if fp and os.path.isfile(fp):
+                    try: os.remove(fp)
+                    except Exception: pass
+        exec_sql("DELETE FROM veterans WHERE id=?", (veteran_id,))
+        return True
+    except Exception:
+        return False
+
 def df_mobile(df: pd.DataFrame, height: int = 420):
     st.dataframe(df, use_container_width=True, height=height)
 
@@ -367,7 +378,8 @@ page = st.sidebar.radio(
         "📅 Prisustvo",
         "📘 Prisustvo trenera",
         "🏋️ Treneri",
-        "📣 Obavijesti",  # NOVO
+        "🎖️ Veterani",
+        "📣 Obavijesti",
         "🏛️ Klub",
         "⚙️ Dijagnostika",
     ],
@@ -414,7 +426,7 @@ if page == "➕ Natjecanja":
                 """,
                 (
                     rb, int(godina), str(datum), str(datum_kraj), natjecanje.strip(), ime_natjecanja.strip(), stil.strip(),
-                    mjesto.strip(), drzava.strip(), kratica.strip(), int(nastupilo), ekipno.strip(), trener.strip(),
+                    mjesto.strip(), drzava.strip(), kratica.strip(), int(nastupilo), ekipno.strip(), tren er.strip(),
                     napomena.strip(), link_rez.strip(), None, vijest.strip(),
                 ),
             )
@@ -427,7 +439,7 @@ if page == "➕ Natjecanja":
                 exec_sql("UPDATE competitions SET galerija_json=? WHERE id=?", (json.dumps(paths, ensure_ascii=False), comp_id))
             st.success(f"✅ Natjecanje spremljeno (# {rb}).")
 
-            # --- AUTOMATSKA E-MAIL OBAVIJEST ADMINU I KLUBU ---
+            # --- AUTOMATSKA E-MAIL OBAVIJEST (SIMULACIJA) ---
             subject = f"Novo natjecanje #{rb} — {ime_natjecanja or natjecanje}"
             body = (
                 f"Novo natjecanje je dodano u sustav HK Podravka:\n\n"
@@ -440,11 +452,11 @@ if page == "➕ Natjecanja":
                 f"• Nastupilo: {nastupilo}\n"
                 f"• Link rezultati: {link_rez or '-'}\n"
             )
-            ok, msg = _send_email_smtp([ADMIN_EMAIL, CLUB_EMAIL], subject, body)
+            ok, msg = simulate_email([ADMIN_EMAIL, CLUB_EMAIL], subject, body)
             if ok:
-                st.info("📧 Poslana e-mail obavijest administratoru i klubu.")
+                st.info(f"📧 {msg}")
             else:
-                st.warning(f"📧 E-mail nije poslan: {msg}")
+                st.warning(f"📧 E-mail SIMULACIJA nije uspjela: {msg}")
 
     st.divider()
     dfc = df_from_sql(
@@ -875,13 +887,120 @@ elif page == "🏋️ Treneri":
         dft = df_from_sql("SELECT ime, prezime, datum_rodjenja, osobna_broj, iban, telefon, email, oib, foto_path, ugovor_path FROM trainers ORDER BY prezime, ime")
         df_mobile(dft)
 
+# ----------------------- 🎖️ Veterani -----------------------
+elif page == "🎖️ Veterani":
+    tab_add, tab_edit, tab_list = st.tabs(["➕ Dodaj veterana", "🛠 Uredi/obriši", "📋 Popis & izvoz"])
+
+    with tab_add:
+        with st.form("frm_veteran_add"):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                ime = st.text_input("Ime *")
+                prezime = st.text_input("Prezime *")
+                datum_rod = st.date_input("Datum rođenja", value=date(1980, 1, 1))
+            with c2:
+                osobna = st.text_input("Broj osobne iskaznice")
+                telefon = st.text_input("Mobitel")
+                email = st.text_input("E-mail")
+            with c3:
+                oib = st.text_input("OIB")
+                napomena = st.text_area("Napomena", height=80)
+            foto = st.file_uploader("Fotografija (JPG/PNG/WEBP)", type=["png", "jpg", "jpeg", "webp"])
+            ugovor = st.file_uploader("Dokument (npr. pristupnica/ugovor) — PDF/DOC/DOCX", type=["pdf", "doc", "docx"])
+
+            if st.form_submit_button("Spremi veterana"):
+                foto_path = save_upload(foto, "veterans") if foto else None
+                ugovor_path = save_upload(ugovor, "veterans") if ugovor else None
+                exec_sql(
+                    """
+                    INSERT INTO veterans (ime, prezime, datum_rodjenja, oib, osobna_broj, telefon, email, foto_path, ugovor_path, napomena)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (ime.strip(), prezime.strip(), str(datum_rod), oib.strip(), osobna.strip(), telefon.strip(), email.strip(), foto_path, ugovor_path, napomena.strip()),
+                )
+                st.success("✅ Veteran dodan.")
+
+    with tab_edit:
+        dfv = df_from_sql("SELECT * FROM veterans ORDER BY prezime, ime")
+        if dfv.empty:
+            st.info("Nema veterana.")
+        else:
+            labels = dfv.apply(lambda rr: f"{rr['prezime']} {rr['ime']}", axis=1).tolist()
+            idx = st.selectbox("Odaberi veterana", list(range(len(labels))), format_func=lambda i: labels[i])
+            r = dfv.iloc[idx]
+
+            fp_t = str(r.get("foto_path") or "").strip()
+            if fp_t and os.path.isfile(fp_t):
+                st.image(fp_t, width=220, caption="Fotografija veterana")
+
+            with st.form("frm_veteran_edit"):
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    ime = st.text_input("Ime *", value=str(r["ime"] or ""))
+                    prezime = st.text_input("Prezime *", value=str(r["prezime"] or ""))
+                    try:
+                        init_date = pd.to_datetime(r["datum_rodjenja"]).date() if r["datum_rodjenja"] else date(1980, 1, 1)
+                    except Exception:
+                        init_date = date(1980, 1, 1)
+                    datum_rod = st.date_input("Datum rođenja", value=init_date)
+                with c2:
+                    osobna = st.text_input("Broj osobne iskaznice", value=str(r["osobna_broj"] or ""))
+                    telefon = st.text_input("Mobitel", value=str(r["telefon"] or ""))
+                    email = st.text_input("E-mail", value=str(r["email"] or ""))
+                with c3:
+                    oib = st.text_input("OIB", value=str(r["oib"] or ""))
+                    napomena = st.text_area("Napomena", value=str(r["napomena"] or ""), height=80)
+
+                nova_foto = st.file_uploader("Zamijeni fotografiju", type=["png", "jpg", "jpeg", "webp"])
+                novi_dok = st.file_uploader("Dodaj/zamijeni dokument (PDF/DOC/DOCX)", type=["pdf", "doc", "docx"])
+
+                if st.form_submit_button("Spremi izmjene"):
+                    foto_path = r.get("foto_path")
+                    if nova_foto is not None:
+                        foto_path = save_upload(nova_foto, "veterans") or foto_path
+                    ugovor_path = r.get("ugovor_path")
+                    if novi_dok is not None:
+                        ugovor_path = save_upload(novi_dok, "veterans") or ugovor_path
+
+                    exec_sql(
+                        """
+                        UPDATE veterans SET
+                            ime=?, prezime=?, datum_rodjenja=?, oib=?, osobna_broj=?, telefon=?, email=?, foto_path=?, ugovor_path=?, napomena=?
+                        WHERE id=?
+                        """,
+                        (ime.strip(), prezime.strip(), str(datum_rod), oib.strip(), osobna.strip(), telefon.strip(), email.strip(), foto_path, ugovor_path, napomena.strip(), int(r["id"])),
+                    )
+                    st.success("✅ Izmjene spremljene.")
+                    st.rerun()
+
+            st.markdown("---")
+            st.subheader("🗑️ Brisanje veterana")
+            c1, c2, c3 = st.columns([1, 1, 2])
+            with c1:
+                del_files = st.checkbox("Obriši i datoteke", value=True, key="veteran_del_files")
+            with c2:
+                confirm_v = st.checkbox("Potvrđujem brisanje", key="veteran_confirm_delete")
+            with c3:
+                if st.button("🗑️ Obriši ovog veterana", disabled=not confirm_v, type="primary", key="veteran_delete_btn"):
+                    if delete_veteran(int(r["id"]), delete_files=del_files):
+                        st.success(f"Veteran {r['prezime']} {r['ime']} obrisan.")
+                        st.rerun()
+                    else:
+                        st.error("Brisanje nije uspjelo.")
+
+    with tab_list:
+        dfv = df_from_sql(
+            "SELECT ime, prezime, datum_rodjenja, osobna_broj, telefon, email, oib, foto_path, ugovor_path FROM veterans ORDER BY prezime, ime"
+        )
+        df_mobile(dfv)
+
 # ----------------------- 📣 Obavijesti -----------------------
 elif page == "📣 Obavijesti":
-    st.subheader("📣 Slanje obavijesti (e-mail, WhatsApp linkovi, SMS*)")
+    st.subheader("📣 Slanje obavijesti (e-mail — simulirano, WhatsApp linkovi, SMS*)")
     st.caption("SMS zahtijeva Twilio konfiguraciju (opcionalno). WhatsApp se šalje ručno preko otvorenog linka.")
 
-    kanal = st.multiselect("Kanal", ["E-mail", "WhatsApp linkovi", "SMS (Twilio)"], default=["E-mail"])
-    publika = st.radio("Publika", ["Članovi", "Treneri"], horizontal=True)
+    kanal = st.multiselect("Kanal", ["E-mail (simulacija)", "WhatsApp linkovi", "SMS (Twilio)"], default=["E-mail (simulacija)"])
+    publika = st.radio("Publika", ["Članovi", "Treneri", "Veterani"], horizontal=True)
 
     if publika == "Članovi":
         dfm = df_from_sql("SELECT id, ime, prezime, email_sportas, email_roditelj, telefon_sportas, telefon_roditelj, grupa_trening FROM members ORDER BY prezime, ime")
@@ -895,23 +1014,19 @@ elif page == "📣 Obavijesti":
             names = dfm.apply(lambda r: f"{r['prezime']} {r['ime']} ({r.get('grupa_trening','')})", axis=1).tolist()
             ids = dfm["id"].tolist()
             odabrani = st.multiselect("Primatelji", options=ids, default=ids, format_func=lambda mid: names[ids.index(mid)])
-            subj = st.text_input("Naslov poruke (za e-mail)", value="Obavijest HK Podravka")
+            subj = st.text_input("Naslov poruke", value="Obavijest HK Podravka")
             body = st.text_area("Tekst poruke", height=160, value="Poštovani,\n\n...")
             if st.button("📤 Pošalji / Pripremi linkove"):
                 df_sel = dfm[dfm["id"].isin(odabrani)]
-                # E-mail
-                if "E-mail" in kanal:
+                # E-mail (simulacija)
+                if "E-mail (simulacija)" in kanal:
                     to_emails = []
                     for _, rr in df_sel.iterrows():
                         for c in ("email_sportas", "email_roditelj"):
                             em = str(rr.get(c) or "").strip()
                             if em: to_emails.append(em)
-                    to_emails = sorted(list(set(to_emails)))
-                    if to_emails:
-                        ok, msg = _send_email_smtp(to_emails, subj, body)
-                        st.success(f"📧 E-mail ({len(to_emails)} primatelja): {msg}" if ok else f"📧 E-mail nije poslan: {msg}")
-                    else:
-                        st.warning("Nema e-mail adresa za odabrane članove.")
+                    ok, msg = simulate_email(to_emails, subj, body)
+                    st.success(f"📧 {msg}" if ok else f"📧 Neuspjeh: {msg}")
                 # WhatsApp
                 if "WhatsApp linkovi" in kanal:
                     st.markdown("**WhatsApp linkovi (klikni svaki red):**")
@@ -933,12 +1048,12 @@ elif page == "📣 Obavijesti":
                             for c in ("telefon_sportas", "telefon_roditelj"):
                                 ph = str(rr.get(c) or "").strip()
                                 if not ph: continue
-                                ok, msg = _send_sms_twilio(ph, body)
+                                ok, _ = _send_sms_twilio(ph, body)
                                 if ok: sent += 1
                                 else: failed += 1
                         st.success(f"📱 SMS poslan: {sent}, neuspješno: {failed}")
 
-    else:  # Treneri
+    elif publika == "Treneri":
         dft = df_from_sql("SELECT id, ime, prezime, email, telefon FROM trainers ORDER BY prezime, ime")
         if dft.empty:
             st.info("Nema trenera.")
@@ -946,17 +1061,14 @@ elif page == "📣 Obavijesti":
             names = dft.apply(lambda r: f"{r['prezime']} {r['ime']}", axis=1).tolist()
             ids = dft["id"].tolist()
             odabrani = st.multiselect("Primatelji", options=ids, default=ids, format_func=lambda mid: names[ids.index(mid)])
-            subj = st.text_input("Naslov poruke (za e-mail)", value="Obavijest HK Podravka — treneri")
+            subj = st.text_input("Naslov poruke", value="Obavijest HK Podravka — treneri")
             body = st.text_area("Tekst poruke", height=160, value="Poštovani treneri,\n\n...")
             if st.button("📤 Pošalji / Pripremi linkove"):
                 df_sel = dft[dft["id"].isin(odabrani)]
-                if "E-mail" in kanal:
+                if "E-mail (simulacija)" in kanal:
                     to_emails = [str(rr.get("email") or "").strip() for _, rr in df_sel.iterrows() if str(rr.get("email") or "").strip()]
-                    if to_emails:
-                        ok, msg = _send_email_smtp(sorted(list(set(to_emails))), subj, body)
-                        st.success(f"📧 E-mail ({len(to_emails)}): {msg}" if ok else f"📧 E-mail nije poslan: {msg}")
-                    else:
-                        st.warning("Nema e-mail adresa za odabrane trenere.")
+                    ok, msg = simulate_email(to_emails, subj, body)
+                    st.success(f"📧 {msg}" if ok else f"📧 Neuspjeh: {msg}")
                 if "WhatsApp linkovi" in kanal:
                     st.markdown("**WhatsApp linkovi (klikni svaki red):**")
                     for _, rr in df_sel.iterrows():
@@ -967,13 +1079,50 @@ elif page == "📣 Obavijesti":
                             st.markdown(f"- {rr['prezime']} {rr['ime']}: [{link}]({link})")
                 if "SMS (Twilio)" in kanal:
                     if not (TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM):
-                        st.warning("Twilio nije konfiguriran (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER).")
+                        st.warning("Twilio nije konfiguriran.")
                     else:
                         sent, failed = 0, 0
                         for _, rr in df_sel.iterrows():
                             ph = str(rr.get("telefon") or "").strip()
                             if not ph: continue
-                            ok, msg = _send_sms_twilio(ph, body)
+                            ok, _ = _send_sms_twilio(ph, body)
+                            if ok: sent += 1
+                            else: failed += 1
+                        st.success(f"📱 SMS poslan: {sent}, neuspješno: {failed}")
+
+    else:  # Veterani
+        dfv = df_from_sql("SELECT id, ime, prezime, email, telefon FROM veterans ORDER BY prezime, ime")
+        if dfv.empty:
+            st.info("Nema veterana.")
+        else:
+            names = dfv.apply(lambda r: f"{r['prezime']} {r['ime']}", axis=1).tolist()
+            ids = dfv["id"].tolist()
+            odabrani = st.multiselect("Primatelji", options=ids, default=ids, format_func=lambda mid: names[ids.index(mid)])
+            subj = st.text_input("Naslov poruke", value="Obavijest HK Podravka — veterani")
+            body = st.text_area("Tekst poruke", height=160, value="Poštovani,\n\n...")
+            if st.button("📤 Pošalji / Pripremi linkove"):
+                df_sel = dfv[dfv["id"].isin(odabrani)]
+                if "E-mail (simulacija)" in kanal:
+                    to_emails = [str(rr.get("email") or "").strip() for _, rr in df_sel.iterrows() if str(rr.get("email") or "").strip()]
+                    ok, msg = simulate_email(to_emails, subj, body)
+                    st.success(f"📧 {msg}" if ok else f"📧 Neuspjeh: {msg}")
+                if "WhatsApp linkovi" in kanal:
+                    st.markdown("**WhatsApp linkovi (klikni svaki red):**")
+                    for _, rr in df_sel.iterrows():
+                        ph = str(rr.get("telefon") or "").strip()
+                        if not ph: continue
+                        link = _wa_link(ph, body)
+                        if link:
+                            st.markdown(f"- {rr['prezime']} {rr['ime']}: [{link}]({link})")
+                if "SMS (Twilio)" in kanal:
+                    if not (TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM):
+                        st.warning("Twilio nije konfiguriran.")
+                    else:
+                        sent, failed = 0, 0
+                        for _, rr in df_sel.iterrows():
+                            ph = str(rr.get("telefon") or "").strip()
+                            if not ph: continue
+                            ok, _ = _send_sms_twilio(ph, body)
                             if ok: sent += 1
                             else: failed += 1
                         st.success(f"📱 SMS poslan: {sent}, neuspješno: {failed}")
@@ -1071,6 +1220,7 @@ else:
             DELETE FROM members;
             DELETE FROM trainers;
             DELETE FROM trainer_attendance;
+            DELETE FROM veterans;
             DELETE FROM club_documents;
 
             UPDATE club_info
@@ -1083,3 +1233,4 @@ else:
             st.success("✅ Svi podaci su obrisani. Struktura tablica je ostala.")
         except Exception as e:
             st.error(f"Greška pri brisanju: {e}")
+
