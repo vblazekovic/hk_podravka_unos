@@ -15,6 +15,13 @@ import streamlit as st
 # ========================== Setup ==========================
 st.set_page_config(page_title="HK Podravka — Sustav", page_icon="🥇", layout="wide", initial_sidebar_state="collapsed")
 
+
+# Logo u sidebaru
+        try:
+            st.sidebar.image("logo.jpg", use_column_width=True)
+        except Exception:
+            pass
+
 CSS = """
 @media (max-width: 640px){ html,body{font-size:16px} section.main>div{padding-top:.5rem!important} }
 .stButton button{padding:.9rem 1.1rem;border-radius:12px;font-weight:600}
@@ -178,6 +185,56 @@ def init_db():
     conn.commit(); conn.close()
 init_db()
 
+
+# ---- Dodatne tablice: rezultati natjecanja i prisustvo trenera ----
+def _ensure_extra_tables():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS competition_results(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        competition_id INTEGER NOT NULL REFERENCES competitions(id) ON DELETE CASCADE,
+        member_id INTEGER REFERENCES members(id) ON DELETE SET NULL,
+        sportas TEXT,
+        kategorija TEXT,
+        ukupno_borbi INTEGER DEFAULT 0,
+        pobjeda INTEGER DEFAULT 0,
+        poraza INTEGER DEFAULT 0,
+        pobjede_nad TEXT,   -- JSON lista stringova "Ime Prezime (Klub)"
+        izgubljeno_od TEXT, -- JSON lista stringova "Ime Prezime (Klub)"
+        napomena TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS coach_attendance(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trener_id INTEGER REFERENCES trainers(id) ON DELETE SET NULL,
+        trener TEXT,
+        datum TEXT NOT NULL,
+        grupa TEXT,
+        vrijeme_od TEXT,
+        vrijeme_do TEXT,
+        trajanje_min INTEGER,
+        created_at TEXT DEFAULT (datetime('now'))
+    )
+    """)
+    
+        # Dodaj nove stupce ako nedostaju
+    try:
+        cols = pd.read_sql("PRAGMA table_info(competition_results)", get_conn())["name"].tolist()
+    except Exception:
+        cols = []
+    if "medalja" not in cols:
+        conn2 = get_conn(); conn2.execute("ALTER TABLE competition_results ADD COLUMN medalja TEXT"); conn2.commit(); conn2.close()
+    if "plasman" not in cols:
+        conn2 = get_conn(); conn2.execute("ALTER TABLE competition_results ADD COLUMN plasman TEXT"); conn2.commit(); conn2.close()
+
+    conn.commit(); conn.close()
+
+_ensure_extra_tables()
+
+
 # ======================= Excel I/O =======================
 ALLOWED_COLS = {
     "members": ["ime","prezime","datum_rodjenja","godina_rodjenja","email_sportas","email_roditelj",
@@ -316,7 +373,10 @@ st.title("🥇 HK Podravka — Sustav")
 page = st.sidebar.radio("Navigacija", [
     "👤 Članovi","📅 Prisustvo","🏋️ Treneri","🎖️ Veterani",
     "🏆 Natjecanja","📑 Pristupnice & Privole","👥 Svi članovi",
-    "📊 Statistika & Pretraga","📧 Podsjetnici"
+    "📊 Statistika & Pretraga","📧 Podsjetnici",
+    "🥇 Rezultati",
+    "🧑‍🏫 Prisustvo trenera",
+    "📊 Rezultati — Statistika & Izvoz"
 ])
 
 # ---------------------- ČLANOVI ----------------------
@@ -710,3 +770,473 @@ else:
         s,k = run_daily_reminders(days)
         if s or k: st.info(f"Automatski ciklus: poslano {s}, preskočeno {k}.")
         else: st.caption("Automatski ciklus danas je već odrađen ili nema primatelja.")
+
+
+
+
+# ---- Predložak za Excel (rezultati natjecanja) ----
+def get_results_template_excel(df_members=None) -> bytes:
+    import pandas as pd
+    from io import BytesIO
+    cols = ["sportas","member_id","kategorija","ukupno_borbi","pobjeda","poraza","pobjede_nad","izgubljeno_od","napomena","medalja","plasman"]
+    rows = []
+        if df_members is not None and not df_members.empty:
+            for _, rr in df_members.iterrows():
+                rows.append({"sportas": f"{rr.prezime} {rr.ime}", "member_id": int(rr.id), "kategorija": "", "ukupno_borbi": "", "pobjeda": "", "poraza": "", "pobjede_nad": "", "izgubljeno_od": "", "napomena": "", "medalja": "—", "plasman": ""})
+        example = rows if rows else [{
+        "sportas": "Prezime Ime",
+        "member_id": "",
+        "kategorija": "U15 52kg",
+        "ukupno_borbi": 3,
+        "pobjeda": 2,
+        "poraza": 1,
+        "pobjede_nad": "Novak Luka (Klub A)\nHorvat Marko (Klub B)",
+        "izgubljeno_od": "Ivić Ivan (Klub C)",
+        "napomena": "",
+        "medalja": "🥈",
+        "plasman": "2."
+    }]
+    df = pd.DataFrame(example, columns=cols)
+    bio = BytesIO()
+    with pd.ExcelWriter(bio, engine="xlsxwriter") as writer:
+        df.to_excel(writer, index=False, sheet_name="Rezultati")
+        ws = writer.sheets["Rezultati"]
+        # malo šire kolone
+        for i, w in enumerate([22,10,18,14,10,10,28,28,18,10,10]):
+            ws.set_column(i, i, w)
+    return bio.getvalue()
+
+
+# ---- Validacija uvoza rezultata ----
+def _validate_results_import(dfu, members_df):
+    import pandas as pd, json
+    allowed_medals = {"—","🥇","🥈","🥉","",None,pd.NA}
+    valid_member_ids = set(members_df["id"].astype(int).tolist()) if not members_df.empty else set()
+    dfu = dfu.copy()
+    dfu.columns = [str(c).strip().lower() for c in dfu.columns]
+    for c in ["sportas","member_id","kategorija","ukupno_borbi","pobjeda","poraza","pobjede_nad","izgubljeno_od","napomena","medalja","plasman"]:
+        if c not in dfu.columns: dfu[c] = None
+    statuses = []; parsed_rows = []
+    for _, rr in (good if not suhi_test else prev[0:0]).iterrows():
+        errs = []
+        mid = None
+        if pd.notna(rr.get("member_id")) and str(rr.get("member_id")).strip() != "":
+            try:
+                mid = int(rr.get("member_id"))
+                if mid not in valid_member_ids: errs.append(f"member_id {mid} ne postoji")
+            except Exception:
+                errs.append("member_id nije broj")
+        sportas = str(rr.get("sportas")).strip() if pd.notna(rr.get("sportas")) else ""
+        if not sportas and not mid:
+            errs.append("nedostaje 'sportas' ili 'member_id'")
+        def to_int(x, name):
+            if pd.isna(x) or str(x).strip()=="": return 0
+            try: return int(x)
+            except Exception: errs.append(f"{name} nije broj"); return 0
+        ukupno = to_int(rr.get("ukupno_borbi"), "ukupno_borbi")
+        pobjeda = to_int(rr.get("pobjeda"), "pobjeda")
+        poraza = to_int(rr.get("poraza"), "poraza")
+        if ukupno and (pobjeda+poraza)!=ukupno: errs.append("pobjeda+poraza != ukupno_borbi")
+        pobjede_list = [str(x).strip() for x in str(rr.get("pobjede_nad") or "").splitlines() if str(x).strip()]
+        izgubljeno_list = [str(x).strip() for x in str(rr.get("izgubljeno_od") or "").splitlines() if str(x).strip()]
+        med = str(rr.get("medalja")).strip() if pd.notna(rr.get("medalja")) else ""
+        if med not in allowed_medals: errs.append("medalja mora biti —/🥇/🥈/🥉 ili prazno")
+        med = None if med in {"","—"} else med
+        plas = str(rr.get("plasman")).strip() if pd.notna(rr.get("plasman")) else None
+        parsed_rows.append({
+            "member_id": mid, "sportas": sportas or None, "kategorija": (str(rr.get("kategorija")).strip() if pd.notna(rr.get("kategorija")) else None),
+            "ukupno_borbi": ukupno, "pobjeda": pobjeda, "poraza": poraza,
+            "pobjede_nad": json.dumps(pobjede_list), "izgubljeno_od": json.dumps(izgubljeno_list),
+            "napomena": (str(rr.get("napomena")).strip() if pd.notna(rr.get("napomena")) else None),
+            "medalja": med, "plasman": plas
+        })
+        statuses.append("; ".join(errs) if errs else "OK")
+    out = pd.DataFrame(parsed_rows); out["status"] = statuses
+    return out
+
+# ---------------------- REZULTATI ----------------------
+if page == "🥇 Rezultati":
+    st.header("🥇 Rezultati natjecanja")
+    # Odabir natjecanja koje je već uneseno
+    df_comp = df_from_sql("SELECT id, godina, datum, datum_kraj, natjecanje, ime_natjecanja, stil_hrvanja, mjesto, drzava, kratica_drzave, nastupilo_podravke, ekipno, trener, napomena FROM competitions ORDER BY godina DESC, datum DESC, redni_broj DESC")
+    if df_comp.empty:
+        st.info("Prvo unesite natjecanje u odjeljku **🏆 Natjecanja**.")
+    else:
+        opt = st.selectbox("Natjecanje", options=df_comp["id"].tolist(),
+                           format_func=lambda i: f"{df_comp.loc[df_comp['id']==i,'godina'].iloc[0]} — {df_comp.loc[df_comp['id']==i,'ime_natjecanja'].iloc[0]} ({df_comp.loc[df_comp['id']==i,'mjesto'].iloc[0]})")
+        sel = df_comp[df_comp["id"]==opt].iloc[0].to_dict()
+        with st.expander("Detalji odabranog natjecanja", expanded=True):
+            c1,c2,c3 = st.columns(3)
+            with c1:
+                st.write("**Godina:**", sel.get("godina"))
+                st.write("**Datum:**", sel.get("datum"))
+                st.write("**Datum kraj:**", sel.get("datum_kraj"))
+                st.write("**Stil hrvanja:**", sel.get("stil_hrvanja"))
+            with c2:
+                st.write("**Naziv:**", sel.get("ime_natjecanja"))
+                st.write("**Natjecanje:**", sel.get("natjecanje"))
+                st.write("**Mjesto:**", sel.get("mjesto"))
+                st.write("**Država:**", sel.get("drzava"))
+            with c3:
+                st.write("**Ekipno:**", sel.get("ekipno"))
+                st.write("**Trener:**", sel.get("trener"))
+                st.write("**Nastupilo Podravke:**", sel.get("nastupilo_podravke"))
+                st.write("**Napomena:**", sel.get("napomena"))
+        st.markdown("---")
+
+        # Unos rezultata po sportašu
+        st.subheader("➕ Unos rezultata sportaša")
+
+# Predložak i uvoz
+with st.expander("📥 Uvoz iz Excela / 📄 Preuzmi predložak", expanded=False):
+    colt1, colt2 = st.columns([1,1])
+    with colt1:
+        if st.button("📄 Preuzmi Excel predložak", use_container_width=True):
+            content = get_results_template_excel()
+            fname_t = f"/mnt/data/rezultati_predlozak.xlsx"
+            with open(fname_t, "wb") as f: f.write(content)
+            st.success(f"[Preuzmi predložak]({fname_t})")
+    with colt2:
+        upl = st.file_uploader("Učitaj Excel s rezultatima (sheet 'Rezultati')", type=["xlsx"])
+                    suhi_test = st.checkbox("Suhi test (bez spremanja u bazu)", value=True)
+        if upl is not None:
+            import pandas as pd, json
+            try:
+                dfu = pd.read_excel(upl, sheet_name=0)
+                            df_members = df_from_sql("SELECT id FROM members")
+                            prev = _validate_results_import(dfu, df_members)
+                            st.markdown("**Pregled validacije**")
+                            st.dataframe(prev, use_container_width=True)
+                            good = prev[prev["status"]=="OK"]
+                            bad = prev[prev["status"]!="OK"]
+                            st.success(f"Ispravnih redaka: {len(good)}")
+                            st.warning(f"Redaka s greškom: {len(bad)}")
+                # Normaliziraj nazive kolona
+                dfu.columns = [str(c).strip().lower() for c in dfu.columns]
+                needed = ["sportas","member_id","kategorija","ukupno_borbi","pobjeda","poraza","pobjede_nad","izgubljeno_od","napomena","medalja","plasman"]
+                for c in needed:
+                    if c not in dfu.columns: dfu[c] = None
+                # Insert svaki red
+                inserted = 0; skipped = 0
+                for _, rr in (good if not suhi_test else prev[0:0]).iterrows():
+                    pobjede_list = []
+                    if pd.notna(rr.get("pobjede_nad")):
+                        pobjede_list = [str(x).strip() for x in str(rr["pobjede_nad"]).splitlines() if str(x).strip()]
+                    izgubljeno_list = []
+                    if pd.notna(rr.get("izgubljeno_od")):
+                        izgubljeno_list = [str(x).strip() for x in str(rr["izgubljeno_od"]).splitlines() if str(x).strip()]
+                    # member_id opcionalan
+                    mid = rr.get("member_id")
+                    try:
+                        mid = int(mid) if pd.notna(mid) and str(mid).strip() != "" else None
+                    except Exception:
+                        mid = None
+                    try:
+                        exec_sql("""
+                            INSERT INTO competition_results(competition_id, member_id, sportas, kategorija, ukupno_borbi, pobjeda, poraza, pobjede_nad, izgubljeno_od, napomena, medalja, plasman)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (int(sel["id"]), mid, (str(rr.get("sportas")).strip() if pd.notna(rr.get("sportas")) else None),
+                                (str(rr.get("kategorija")).strip() if pd.notna(rr.get("kategorija")) else None),
+                                int(rr.get("ukupno_borbi") or 0), int(rr.get("pobjeda") or 0), int(rr.get("poraza") or 0),
+                                json.dumps(pobjede_list), json.dumps(izgubljeno_list),
+                                (str(rr.get("napomena")).strip() if pd.notna(rr.get("napomena")) else None),
+                                (str(rr.get("medalja")).strip() if pd.notna(rr.get("medalja")) and str(rr.get("medalja")).strip() != "—" else None),
+                                (str(rr.get("plasman")).strip() if pd.notna(rr.get("plasman")) else None)))
+                        inserted += 1
+                    except Exception:
+                        skipped += 1
+                st.success(f"Uvezeno redaka: {inserted}, preskočeno: {skipped}")
+                st.info("Napomena: 'member_id' je opcionalan. Ako je ispunjen i postoji u bazi, sportaš se veže na člana.")
+            except Exception as e:
+                st.error(f"Greška pri čitanju Excela: {e}")
+
+        df_m = df_from_sql("SELECT id, ime, prezime, grupa_trening FROM members ORDER BY prezime, ime")
+        member_map = {int(r.id): f"{r.prezime} {r.ime} ({r.grupa_trening or ''})" for _,r in df_m.iterrows()} if not df_m.empty else {}
+        colA, colB = st.columns([2,1])
+        with colA:
+            member_id = st.selectbox("Sportaš (opcionalno)", options=[None]+list(member_map.keys()), format_func=lambda i: "—" if i is None else member_map[i])
+            sportas = st.text_input("Ime i prezime (ako nije iz baze)", value=(member_map[member_id].split(' (')[0] if member_id else ""))
+            kategorija = st.text_input("Kategorija (npr. U15 52kg)")
+        with colB:
+            ukupno = st.number_input("Ukupno borbi", min_value=0, value=0, step=1)
+            pobjeda = st.number_input("Pobjeda", min_value=0, value=0, step=1)
+            poraza = st.number_input("Poraza", min_value=0, value=0, step=1)
+        c1, c2 = st.columns(2)
+        with c1:
+            pobjede_nad_raw = st.text_area("Pobjede nad (po jedan red):", placeholder="Ime Prezime (Klub)\n...")
+        with c2:
+            izgubljeno_od_raw = st.text_area("Izgubljeno od (po jedan red):", placeholder="Ime Prezime (Klub)\n...")
+        
+colm1, colm2 = st.columns(2)
+with colm1:
+    napomena = st.text_area("Napomena (opcionalno)", placeholder="...")
+with colm2:
+    medalja = st.selectbox("Medalja", options=["—","🥇","🥈","🥉"], index=0)
+    plasman = st.text_input("Plasman (npr. 5.)", value="")
+
+
+        if st.button("💾 Spremi rezultat", type="primary", use_container_width=True):
+            pobjede_list = [x.strip() for x in (pobjede_nad_raw or "").splitlines() if x.strip()]
+            izgubljeno_list = [x.strip() for x in (izgubljeno_od_raw or "").splitlines() if x.strip()]
+            exec_sql("""
+                INSERT INTO competition_results(competition_id, member_id, sportas, kategorija, ukupno_borbi, pobjeda, poraza, pobjede_nad, izgubljeno_od, napomena, medalja, plasman)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (int(sel["id"]), int(member_id) if member_id else None, sportas.strip() or None, kategorija.strip() or None, int(ukupno), int(pobjeda), int(poraza), json.dumps(pobjede_list), json.dumps(izgubljeno_list), (napomena.strip() or None), (medalja if medalja!='—' else None), (plasman.strip() or None)))
+            st.success("Rezultat spremljen.")
+
+        # Popis rezultata za odabrano natjecanje
+        st.subheader("📋 Rezultati — popis")
+        dfr = df_from_sql("""
+            SELECT r.id, COALESCE(r.sportas, m.prezime||' '||m.ime) AS sportas, r.kategorija, r.ukupno_borbi, r.pobjeda, r.poraza, r.pobjede_nad, r.izgubljeno_od, r.napomena
+            FROM competition_results r
+            LEFT JOIN members m ON m.id = r.member_id
+            WHERE r.competition_id=?
+            ORDER BY sportas
+        """, (int(sel["id"]),))
+        if dfr.empty:
+            st.caption("Nema unesenih rezultata.")
+        else:
+            # Pretvori JSON polja u čitljiv tekst
+            def _join_json(col):
+                try:
+                    arr = json.loads(col) if col else []
+                    return "\\n".join(arr)
+                except Exception:
+                    return str(col or "")
+            dfr["Pobjede nad"] = dfr["pobjede_nad"].apply(_join_json)
+            dfr["Izgubljeno od"] = dfr["izgubljeno_od"].apply(_join_json)
+            dfr = dfr.drop(columns=["pobjede_nad","izgubljeno_od"])
+                if "medalja" in dfr.columns: dfr.rename(columns={"medalja":"Medalja"}, inplace=True)
+                if "plasman" in dfr.columns: dfr.rename(columns={"plasman":"Plasman"}, inplace=True)
+            st.dataframe(dfr, use_container_width=True)
+            # Brisanje pojedinog rezultata
+            rid = st.selectbox("Brisanje rezultata (odaberi ID)", options=[None]+dfr["id"].astype(int).tolist())
+            if rid and st.button("🗑️ Obriši odabrani rezultat"):
+                exec_sql("DELETE FROM competition_results WHERE id=?", (int(rid),))
+                st.success("Obrisano."); st.experimental_rerun()
+
+# ------------------ PRISUSTVO TRENERA ------------------
+if page == "🧑‍🏫 Prisustvo trenera":
+    st.header("🧑‍🏫 Prisustvo trenera")
+    tab_unos, tab_stat = st.tabs(["➕ Unos prisustva","📈 Statistika"])
+
+    with tab_unos:
+        df_t = df_from_sql("SELECT id, ime, prezime FROM trainers ORDER BY prezime, ime")
+        trener_map = {int(r.id): f"{r.prezime} {r.ime}" for _,r in df_t.iterrows()} if not df_t.empty else {}
+        trener_id = st.selectbox("Trener", options=[None]+list(trener_map.keys()), format_func=lambda i: "—" if i is None else trener_map[i])
+        trener_name = st.text_input("Ime i prezime (ako nije iz baze)", value=(trener_map[trener_id] if trener_id else ""))
+
+        col1, col2 = st.columns(2)
+        with col1:
+            datum = st.date_input("Datum", value=date.today())
+            grupa_opts = df_from_sql("SELECT DISTINCT COALESCE(grupa_trening,'') AS g FROM members ORDER BY g")["g"].tolist()
+            grupa = st.selectbox("Grupa", options=[""] + [g for g in grupa_opts if g], index=0)
+        with col2:
+            izbor = st.radio("Vrijeme", options=["18:30–20:00","20:15–22:00","Ručno"], horizontal=True)
+            if izbor == "18:30–20:00":
+                vrijeme_od, vrijeme_do = "18:30","20:00"
+            elif izbor == "20:15–22:00":
+                vrijeme_od, vrijeme_do = "20:15","22:00"
+            else:
+                t1 = st.time_input("Od", value=datetime.strptime("18:30","%H:%M").time())
+                t2 = st.time_input("Do", value=datetime.strptime("20:00","%H:%M").time())
+                vrijeme_od, vrijeme_do = t1.strftime("%H:%M"), t2.strftime("%H:%M")
+        # izračun trajanja u minutama
+        try:
+            h1,m1 = map(int, vrijeme_od.split(":")); h2,m2 = map(int, vrijeme_do.split(":"))
+            trajanje_min = max(0, (h2*60+m2) - (h1*60+m1))
+        except Exception:
+            trajanje_min = None
+        st.caption(f"Trajanje: {trajanje_min/60:.2f} h" if trajanje_min is not None else "Trajanje nije izračunato.")
+
+        if st.button("💾 Spremi prisustvo", type="primary"):
+            exec_sql("""
+                INSERT INTO coach_attendance(trener_id, trener, datum, grupa, vrijeme_od, vrijeme_do, trajanje_min)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (int(trener_id) if trener_id else None, trener_name.strip() or None, str(datum), grupa or None, vrijeme_od, vrijeme_do, trajanje_min))
+            st.success("Spremljeno.")
+
+        st.markdown("---")
+        st.subheader("Zadnji unosi")
+        dfa = df_from_sql("""
+            SELECT ca.id, COALESCE(t.prezime||' '||t.ime, ca.trener) AS trener,
+                   ca.datum, ca.grupa, ca.vrijeme_od||'–'||ca.vrijeme_do AS termin,
+                   ROUND(COALESCE(ca.trajanje_min,0)/60.0,2) AS sati
+            FROM coach_attendance ca
+            LEFT JOIN trainers t ON t.id=ca.trener_id
+            ORDER BY ca.datum DESC, ca.id DESC
+            LIMIT 50
+        """)
+        st.dataframe(dfa, use_container_width=True)
+
+    with tab_stat:
+        c1,c2,c3 = st.columns(3)
+        with c1:
+            god = st.number_input("Godina", min_value=2020, max_value=date.today().year+1, value=date.today().year, step=1)
+        with c2:
+            mjesec = st.selectbox("Mjesec", options=[0]+list(range(1,13)), format_func=lambda m: "Svi" if m==0 else f"{m:02d}")
+        with c3:
+            trener_filter = st.text_input("Filter trenera (ime/prezime)", value="")
+
+        # Filtriranje
+        q = "SELECT COALESCE(t.prezime||' '||t.ime, ca.trener) AS trener, ca.datum, ca.grupa, ca.trajanje_min FROM coach_attendance ca LEFT JOIN trainers t ON t.id=ca.trener_id WHERE 1=1"
+        params = []
+        if god:
+            q += " AND substr(ca.datum,1,4)=?"; params.append(str(int(god)))
+        if mjesec and int(mjesec)>0:
+            q += " AND substr(ca.datum,6,2)=?"; params.append(f"{int(mjesec):02d}")
+        dfa = df_from_sql(q, tuple(params))
+
+        if trener_filter.strip():
+            dfa = dfa[dfa["trener"].str.contains(trener_filter.strip(), case=False, na=False)]
+
+        if dfa.empty:
+            st.info("Nema podataka za odabrani period.")
+        else:
+            dfa["sati"] = dfa["trajanje_min"].fillna(0)/60.0
+            # mjesečni i godišnji zbrojevi
+            total_hours = round(dfa["sati"].sum(), 2)
+            st.metric("Ukupno sati", f"{total_hours:.2f}")
+            # Po treneru
+            grp = dfa.groupby("trener", dropna=False)["sati"].sum().sort_values(ascending=False).reset_index()
+            st.subheader("Po treneru (sati)")
+            st.dataframe(grp, use_container_width=True)
+            # Po mjesecu u godini (ako odabrana godina bez mjeseca)
+            if mjesec == 0:
+                dfa["m"] = dfa["datum"].str.slice(0,7)
+                by_m = dfa.groupby("m")["sati"].sum().reset_index().rename(columns={"m":"Mjesec","sati":"Sati"})
+                st.subheader("Po mjesecima")
+                st.bar_chart(by_m.set_index("Mjesec"))
+
+
+
+# ------------- REZULTATI — STATISTIKA & IZVOZ -------------
+if page == "📊 Rezultati — Statistika & Izvoz":
+    st.header("📊 Rezultati — Statistika & Izvoz")
+
+    colf1, colf2, colf3, colf4 = st.columns(4)
+    with colf1:
+        god = st.number_input("Godina", min_value=2010, max_value=date.today().year, value=date.today().year, step=1)
+    with colf2:
+        samo_ph = st.checkbox("Samo Prvenstvo Hrvatske")
+    with colf3:
+        sportas_filter = st.text_input("Sportaš (ime ili prezime)", value="")
+    with colf4:
+        natjec_filter = st.text_input("Filter naziva natjecanja", value="")
+
+    q = """
+        SELECT r.*, COALESCE(r.sportas, m.prezime||' '||m.ime) AS sportas_label,
+               c.ime_natjecanja, c.natjecanje, c.godina, c.datum, c.mjesto, c.drzava
+        FROM competition_results r
+        JOIN competitions c ON c.id = r.competition_id
+        LEFT JOIN members m ON m.id = r.member_id
+        WHERE c.godina = ?
+    """
+    params = [int(god)]
+    dfr = df_from_sql(q, tuple(params))
+
+    if samo_ph:
+        dfr = dfr[dfr["ime_natjecanja"].fillna("").str.lower().str.contains("prvenstvo hrvatske") | dfr["natjecanje"].fillna("").str.lower().str.contains("prvenstvo hrvatske")]
+    if sportas_filter.strip():
+        dfr = dfr[dfr["sportas_label"].fillna("").str.contains(sportas_filter.strip(), case=False, na=False)]
+    if natjec_filter.strip():
+        dfr = dfr[dfr["ime_natjecanja"].fillna("").str.contains(natjec_filter.strip(), case=False, na=False) | dfr["natjecanje"].fillna("").str.contains(natjec_filter.strip(), case=False, na=False)]
+
+    if dfr.empty:
+        st.info("Nema rezultata za zadane filtre.")
+    else:
+        total_entries = len(dfr)
+        total_competitions = dfr["competition_id"].nunique()
+        wins = dfr["pobjeda"].fillna(0).astype(int).sum()
+        losses = dfr["poraza"].fillna(0).astype(int).sum()
+        win_rate = (wins / max(1, wins + losses)) * 100.0
+
+        dfr_ph = dfr[dfr["ime_natjecanja"].fillna("").str.lower().str.contains("prvenstvo hrvatske") | dfr["natjecanje"].fillna("").str.lower().str.contains("prvenstvo hrvatske")]
+        ph_entries = len(dfr_ph)
+
+        colm = st.columns(5)
+        colm[0].metric("Unosa rezultata", f"{total_entries}")
+        colm[1].metric("Različitih natjecanja", f"{total_competitions}")
+        colm[2].metric("Pobjede", f"{wins}")
+        colm[3].metric("Porazi", f"{losses}")
+        colm[4].metric("Win rate", f"{win_rate:.1f}%")
+
+        medal_counts = dfr["medalja"].value_counts(dropna=True) if "medalja" in dfr.columns else pd.Series(dtype=int)
+        c1,c2,c3 = st.columns(3)
+        c1.metric("🥇", int(medal_counts.get("🥇", 0)))
+        c2.metric("🥈", int(medal_counts.get("🥈", 0)))
+        c3.metric("🥉", int(medal_counts.get("🥉", 0)))
+
+        st.caption(f"**Nastupa na Prvenstvu Hrvatske:** {ph_entries}")
+
+        st.markdown("### Rezultati (filtrirani)")
+        view_cols = ["sportas_label","kategorija","ime_natjecanja","mjesto","pobjeda","poraza","medalja","plasman","napomena"]
+        view_cols = [c for c in view_cols if c in dfr.columns]
+        st.dataframe(dfr[view_cols].sort_values(["ime_natjecanja","sportas_label"]), use_container_width=True)
+
+        # Excel export
+        from io import BytesIO
+        import pandas as pd
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            dfr.rename(columns={"sportas_label":"Sportaš","kategorija":"Kategorija","ime_natjecanja":"Natjecanje","mjesto":"Mjesto","pobjeda":"Pobjede","poraza":"Porazi","medalja":"Medalja","plasman":"Plasman","napomena":"Napomena"}).to_excel(writer, sheet_name="Rezultati", index=False)
+            summary = pd.DataFrame({
+                "Pokazatelj": ["Unosa rezultata","Natjecanja","Pobjede","Porazi","Win rate %","Nastupa na PH","🥇","🥈","🥉"],
+                "Vrijednost": [total_entries,total_competitions,wins,losses,round(win_rate,1),ph_entries,int(medal_counts.get("🥇",0)),int(medal_counts.get("🥈",0)),int(medal_counts.get("🥉",0))]
+            })
+            summary.to_excel(writer, sheet_name="Sažetak", index=False)
+        fname = f"/mnt/data/rezultati_izvoz_{int(datetime.now().timestamp())}.xlsx"
+        with open(fname, "wb") as f: f.write(output.getvalue())
+        st.success(f"[Preuzmi Excel izvoz]({fname})")
+
+    st.markdown("---")
+    st.subheader("👤 Statistika jednog sportaša")
+    df_m = df_from_sql("SELECT id, ime, prezime FROM members ORDER BY prezime, ime")
+    member_map = {int(r.id): f"{r.prezime} {r.ime}" for _,r in df_m.iterrows()} if not df_m.empty else {}
+    colp1, colp2 = st.columns(2)
+    with colp1:
+        member_pick = st.selectbox("Sportaš (iz baze)", options=[None]+list(member_map.keys()), format_func=lambda i: "—" if i is None else member_map[i])
+    with colp2:
+        godina_sportas = st.number_input("Godina (sportaš)", min_value=2010, max_value=date.today().year, value=date.today().year, step=1)
+
+    if member_pick:
+        q2 = """
+            SELECT r.*, COALESCE(r.sportas, m.prezime||' '||m.ime) AS sportas_label,
+                   c.ime_natjecanja, c.natjecanje, c.godina, c.datum, c.mjesto
+            FROM competition_results r
+            JOIN competitions c ON c.id = r.competition_id
+            LEFT JOIN members m ON m.id = r.member_id
+            WHERE c.godina = ? AND (r.member_id = ? OR r.sportas = ?)
+        """
+        sportas_name = member_map.get(int(member_pick))
+        dfa = df_from_sql(q2, (int(godina_sportas), int(member_pick), sportas_name))
+        if dfa.empty:
+            st.info("Nema rezultata za odabranog sportaša u toj godini.")
+        else:
+            wins_s = dfa["pobjeda"].fillna(0).astype(int).sum()
+            losses_s = dfa["poraza"].fillna(0).astype(int).sum()
+            win_rate_s = (wins_s / max(1, wins_s + losses_s)) * 100.0
+            medal_counts_s = dfa["medalja"].value_counts(dropna=True) if "medalja" in dfa.columns else pd.Series(dtype=int)
+            cm = st.columns(5)
+            cm[0].metric("Unosa", len(dfa))
+            cm[1].metric("Pobjede", wins_s)
+            cm[2].metric("Porazi", losses_s)
+            cm[3].metric("Win rate", f"{win_rate_s:.1f}%")
+            cm[4].metric("Medalje", int(medal_counts_s.sum()) if not medal_counts_s.empty else 0)
+            show_cols = ["ime_natjecanja","kategorija","pobjeda","poraza","medalja","plasman","napomena"]
+            show_cols = [c for c in show_cols if c in dfa.columns]
+            st.dataframe(dfa[show_cols].sort_values("ime_natjecanja"), use_container_width=True)
+
+            # Export for athlete
+            from io import BytesIO
+            output2 = BytesIO()
+            with pd.ExcelWriter(output2, engine="xlsxwriter") as writer:
+                dfa.rename(columns={"ime_natjecanja":"Natjecanje","kategorija":"Kategorija","pobjeda":"Pobjede","poraza":"Porazi","medalja":"Medalja","plasman":"Plasman","napomena":"Napomena"}).to_excel(writer, sheet_name="Rezultati", index=False)
+                summary2 = pd.DataFrame({
+                    "Pokazatelj": ["Unosa","Pobjede","Porazi","Win rate %","🥇","🥈","🥉"],
+                    "Vrijednost": [len(dfa), wins_s, losses_s, round(win_rate_s,1), int(medal_counts_s.get("🥇",0)), int(medal_counts_s.get("🥈",0)), int(medal_counts_s.get("🥉",0))]
+                })
+                summary2.to_excel(writer, sheet_name="Sažetak", index=False)
+            fname2 = f"/mnt/data/rezultati_sportas_{int(datetime.now().timestamp())}.xlsx"
+            with open(fname2, "wb") as f: f.write(output2.getvalue())
+            st.success(f"[Preuzmi Excel (sportaš)]({fname2})")
