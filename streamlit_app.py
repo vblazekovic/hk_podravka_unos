@@ -15,6 +15,13 @@ import streamlit as st
 # ========================== Setup ==========================
 st.set_page_config(page_title="HK Podravka — Sustav", page_icon="🥇", layout="wide", initial_sidebar_state="collapsed")
 
+# Logo u sidebaru (iz settings) + fallback
+_lp = get_setting("logo_path", "logo.jpg")
+try:
+    st.sidebar.image(_lp, use_column_width=True)
+except Exception:
+    pass
+
 
 # Logo u sidebaru
         try:
@@ -65,6 +72,31 @@ def get_conn():
     return conn
 
 # ======================= Helpers =======================
+
+def get_setting(key: str, default: str|None=None):
+    try:
+        df = df_from_sql("SELECT value FROM settings WHERE key=?", (key,))
+        if not df.empty: return df["value"].iloc[0]
+    except Exception: pass
+    return default
+def set_setting(key: str, value: str):
+    try:
+        exec_sql("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+    except Exception: pass
+
+
+def status_dot(expiry_str: str|None, warn_days: int = 30) -> str:
+    from datetime import datetime as _dt
+    if not expiry_str: return "⚪"
+    try:
+        d = _dt.fromisoformat(str(expiry_str)).date()
+    except Exception:
+        return "⚪"
+    today = date.today()
+    if d < today: return "🔴"
+    if (d - today).days <= warn_days: return "🟠"
+    return "🟢"
+
 def sanitize_filename(name: str) -> str:
     base = os.path.basename(str(name))
     return re.sub(r"[^A-Za-z0-9._-]+", "_", base)
@@ -169,8 +201,19 @@ def init_db():
         napomena TEXT, link_rezultati TEXT, galerija_json TEXT, vijest TEXT,
         created_at TEXT DEFAULT (datetime('now'))
     );
-    """)
-    # migracije
+    
+    CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+""")
+    
+    # dodatne migracije — members passport & extra docs
+    cols = pd.read_sql("PRAGMA table_info(members)", conn)["name"].tolist()
+    for col, ddl in [
+        ("passport_number","TEXT"),
+        ("passport_expiry","TEXT")
+    ]:
+        if col not in cols:
+            cur.execute(f"ALTER TABLE members ADD COLUMN {col} {ddl}")
+# migracije
     cols = pd.read_sql("PRAGMA table_info(members)", conn)["name"].tolist()
     for col, ddl in [
         ("medical_valid_until","TEXT"),
@@ -376,7 +419,9 @@ page = st.sidebar.radio("Navigacija", [
     "📊 Statistika & Pretraga","📧 Podsjetnici",
     "🥇 Rezultati",
     "🧑‍🏫 Prisustvo trenera",
-    "📊 Rezultati — Statistika & Izvoz"
+    "📊 Rezultati — Statistika & Izvoz",
+    "⚙️ Postavke",
+    "🔁 Uvoz starih rezultata"
 ])
 
 # ---------------------- ČLANOVI ----------------------
@@ -466,6 +511,45 @@ if page == "👤 Članovi":
                 exec_many("DELETE FROM members WHERE id=?", [(int(i),) for i in sel])
                 st.success(f"Obrisano: {len(sel)}"); st.experimental_rerun()
 
+
+st.markdown("---")
+st.subheader("📎 Dokumenti člana (upload)")
+dfl = df_from_sql("SELECT id, prezime||' '||ime AS label FROM members ORDER BY prezime, ime")
+if dfl.empty:
+    st.info("Nema članova.")
+else:
+    sel_mid = st.selectbox("Član", options=dfl["id"].tolist(), format_func=lambda i: dfl.loc[dfl['id']==i,'label'].iloc[0], key="doc_member")
+    c1,c2 = st.columns(2)
+    with c1:
+        med_file = st.file_uploader("Liječnička potvrda — upload (PDF/JPG)", type=["pdf","jpg","jpeg","png"], key="med_upl")
+        med_until = st.date_input("Vrijedi do", value=None, key="med_until")
+    with c2:
+        pri_file = st.file_uploader("Pristupnica — upload (PDF/JPG)", type=["pdf","jpg","jpeg","png"], key="pri_upl")
+        pass_no = st.text_input("Broj putovnice", value="", key="pass_no")
+        pass_until = st.date_input("Putovnica vrijedi do", value=None, key="pass_until")
+    if st.button("💾 Spremi dokumente", type="primary", key="save_docs"):
+        updates = {}
+        Path("data/uploads").mkdir(parents=True, exist_ok=True)
+        if med_file is not None:
+            mp = f"data/uploads/med_{sel_mid}_{int(datetime.now().timestamp())}.{med_file.name.split('.')[-1]}"
+            with open(mp, "wb") as f: f.write(med_file.read())
+            updates["medical_path"] = mp
+        if med_until:
+            updates["medical_valid_until"] = str(med_until)
+        if pri_file is not None:
+            pp = f"data/uploads/pristupnica_{sel_mid}_{int(datetime.now().timestamp())}.{pri_file.name.split('.')[-1]}"
+            with open(pp, "wb") as f: f.write(pri_file.read())
+            updates["pristupnica_path"] = pp
+            updates["pristupnica_date"] = str(date.today())
+        if pass_no.strip():
+            updates["passport_number"] = pass_no.strip()
+        if pass_until:
+            updates["passport_expiry"] = str(pass_until)
+        if updates:
+            sets = ", ".join([f"{k}=?" for k in updates.keys()])
+            params = list(updates.values()) + [int(sel_mid)]
+            exec_sql(f"UPDATE members SET {sets} WHERE id=?", tuple(params))
+            st.success("Spremljeno.")
 # ---------------------- PRISUSTVO ----------------------
 elif page == "📅 Prisustvo":
     st.subheader("📅 Evidencija prisustva članova")
@@ -715,14 +799,14 @@ elif page == "📊 Statistika & Pretraga":
         df = df_from_sql("SELECT ime, prezime, telefon, email, iban FROM trainers")
         if txt:
             t = txt.lower()
-            df = df[df.apply(lambda r: t in str(r.values).lower(), axis=1)]
+            df = df[df.apply(lambda r, term=t: term in str(r.values).lower(), axis=1)]
         df_mobile(df)
     with tabs[2]:
         txt = st.text_input("Traži (ime/prezime/telefon/email) — Veterani")
         df = df_from_sql("SELECT ime, prezime, telefon, email FROM veterans")
         if txt:
             t = txt.lower()
-            df = df[df.apply(lambda r: t in str(r.values).lower(), axis=1)]
+            df = df[df.apply(lambda r, term=t: term in str(r.values).lower(), axis=1)]
         df_mobile(df)
     with tabs[3]:
         c1,c2,c3 = st.columns(3)
@@ -1240,3 +1324,122 @@ if page == "📊 Rezultati — Statistika & Izvoz":
             fname2 = f"/mnt/data/rezultati_sportas_{int(datetime.now().timestamp())}.xlsx"
             with open(fname2, "wb") as f: f.write(output2.getvalue())
             st.success(f"[Preuzmi Excel (sportaš)]({fname2})")
+
+# ---------------------- POSTAVKE ----------------------
+if page == "⚙️ Postavke":
+    st.header("⚙️ Postavke")
+    st.subheader("Logo kluba")
+    upl = st.file_uploader("Učitaj logo (.jpg/.png)", type=["jpg","jpeg","png"], key="logo_upl")
+    if upl is not None:
+        Path("data").mkdir(parents=True, exist_ok=True)
+        lp = f"data/logo_uploaded_{int(datetime.now().timestamp())}.{upl.name.split('.')[-1]}"
+        with open(lp, "wb") as f: f.write(upl.read())
+        set_setting("logo_path", lp)
+        st.success("Logo spremljen.")
+        st.experimental_rerun()
+    st.caption(f"Aktualni logo: {get_setting('logo_path','logo.jpg')}")
+
+
+# ------------- UVOZ STARIH REZULTATA (auto-migracija) -------------
+if page == "🔁 Uvoz starih rezultata":
+    st.header("🔁 Uvoz starih rezultata")
+    st.caption("Automatski detektira tablice poput 'results' ili 'rezultati' i pokušava ih prebaciti u 'competition_results'.")
+
+    # Prikaži postojeće tablice
+    try:
+        df_tables = df_from_sql("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        st.write("Tablice u bazi:", ", ".join(df_tables["name"].tolist()))
+    except Exception as e:
+        st.error(f"Greška pri čitanju tablica: {e}")
+        df_tables = None
+
+    legacy_tables = []
+    if df_tables is not None and not df_tables.empty:
+        for t in df_tables["name"].tolist():
+            if t.lower() in ("results","rezultati","competition_results_old","old_results"):
+                legacy_tables.append(t)
+
+    if not legacy_tables:
+        st.info("Nije pronađena stara tablica rezultata ('results', 'rezultati', ...). Ako imaš Excel/CSV, uvezi kroz sekciju 🥇 Rezultati.")
+    else:
+        pick = st.selectbox("Stara tablica", options=legacy_tables)
+        df_legacy = df_from_sql(f"SELECT * FROM {pick} LIMIT 5")
+        st.subheader("Primjer podataka (prvih 5 redaka)")
+        st.dataframe(df_legacy, use_container_width=True)
+
+        st.markdown("#### Mapiranje polja (pokušaj automatskog mapiranja)")
+        # heuristično mapiranje naziva
+        def guess(cols, *cands):
+            s = {c.lower():c for c in cols}
+            for c in cands:
+                for k in s:
+                    if c in k: return s[k]
+            return None
+
+        cols = df_from_sql(f"PRAGMA table_info({pick})")["name"].tolist()
+        map_cfg = {}
+        map_cfg["competition_id"] = guess(cols, "competition_id","natjecanje_id","comp_id","cid")
+        map_cfg["member_id"] = guess(cols, "member_id","clan_id","mid","sportas_id")
+        map_cfg["sportas"] = guess(cols, "sportas","ime","prezime","sportaš","athlete","competitor")
+        map_cfg["kategorija"] = guess(cols, "kategorija","kat","category","weight")
+        map_cfg["ukupno_borbi"] = guess(cols, "ukupno","borbi","meceva","mečeva","bouts","fights","matches")
+        map_cfg["pobjeda"] = guess(cols, "pobjeda","wins","win")
+        map_cfg["poraza"] = guess(cols, "poraz","losses","loss")
+        map_cfg["pobjede_nad"] = guess(cols, "pobjede_nad","wins_over","pobjede-protiv")
+        map_cfg["izgubljeno_od"] = guess(cols, "izgubljeno_od","lost_to","porazi-od")
+        map_cfg["napomena"] = guess(cols, "napomena","note","biljeska","bilješka","remark")
+        map_cfg["medalja"] = guess(cols, "medalja","medal","med")
+        map_cfg["plasman"] = guess(cols, "plasman","rank","place","poredak")
+
+        st.json(map_cfg)
+
+        dry = st.checkbox("Suhi test (bez spremanja)", value=True)
+        if st.button("🚚 Pokreni migraciju"):
+            import pandas as pd, json as _json
+            dfl = df_from_sql(f"SELECT * FROM {pick}")
+            inserted = 0; skipped = 0
+            for _, r in dfl.iterrows():
+                def val(key):
+                    col = map_cfg.get(key)
+                    return (r[col] if (col and col in r.index) else None)
+                try:
+                    comp_id = int(val("competition_id")) if pd.notna(val("competition_id")) else None
+                except Exception:
+                    comp_id = None
+                # preskoči bez competition_id
+                if not comp_id:
+                    skipped += 1; continue
+                try:
+                    pobjede_list = []
+                    if pd.notna(val("pobjede_nad")):
+                        pobjede_list = [str(x).strip() for x in str(val("pobjede_nad")).splitlines() if str(x).strip()]
+                    izgubljeno_list = []
+                    if pd.notna(val("izgubljeno_od")):
+                        izgubljeno_list = [str(x).strip() for x in str(val("izgubljeno_od")).splitlines() if str(x).strip()]
+                    params = (
+                        comp_id,
+                        int(val("member_id")) if pd.notna(val("member_id")) else None,
+                        str(val("sportas")).strip() if pd.notna(val("sportas")) else None,
+                        str(val("kategorija")).strip() if pd.notna(val("kategorija")) else None,
+                        int(val("ukupno_borbi") or 0) if pd.notna(val("ukupno_borbi")) else 0,
+                        int(val("pobjeda") or 0) if pd.notna(val("pobjeda")) else 0,
+                        int(val("poraza") or 0) if pd.notna(val("poraza")) else 0,
+                        _json.dumps(pobjede_list), _json.dumps(izgubljeno_list),
+                        str(val("napomena")).strip() if pd.notna(val("napomena")) else None,
+                        str(val("medalja")).strip() if pd.notna(val("medalja")) else None,
+                        str(val("plasman")).strip() if pd.notna(val("plasman")) else None
+                    )
+                    if dry:
+                        inserted += 1  # simulacija
+                    else:
+                        exec_sql("""
+                            INSERT INTO competition_results(competition_id, member_id, sportas, kategorija, ukupno_borbi, pobjeda, poraza, pobjede_nad, izgubljeno_od, napomena, medalja, plasman)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, params)
+                        inserted += 1
+                except Exception:
+                    skipped += 1
+            if dry:
+                st.warning(f"Suhi test: migriralo bi se {inserted} redaka, preskočeno: {skipped}.")
+            else:
+                st.success(f"Migrirano: {inserted}, preskočeno: {skipped}")
