@@ -1094,8 +1094,8 @@ def section_competitions():
         except Exception as e:
             st.error(f"Greška pri uvozu: {e}")
     # Export svih rezultata
-    res_all = pd.read_sql_query("""
-        SELECT cr.id, c.name AS natjecanje, c.date_from AS datum, m.full_name AS sportaš,
+    
+    res_all = pd.read_sql_query("""        SELECT cr.id, c.name AS natjecanje, c.date_from AS datum, m.full_name AS sportaš,
                cr.weight_category AS kategorija, cr.style AS stil,
                cr.bouts_total AS borbi, cr.wins AS pobjede, cr.losses AS porazi, cr.placement AS plasman
         FROM competition_results cr
@@ -1103,7 +1103,17 @@ def section_competitions():
         LEFT JOIN members m ON m.id=cr.member_id
         ORDER BY c.date_from DESC
     """, conn)
+    # formatiraj datum i redni broj za prikaz i export
+    if not res_all.empty:
+        try:
+            res_all['datum'] = pd.to_datetime(res_all['datum']).dt.strftime('%d.%m.%Y.')
+        except Exception:
+            pass
+        res_all.insert(0, 'R.br.', range(1, len(res_all)+1))
     st.download_button("Skini sve rezultate (Excel)",
+                       data=excel_bytes_from_df(res_all, "Rezultati"),
+                       file_name="rezultati.xlsx")
+    "Skini sve rezultate (Excel)",
                        data=excel_bytes_from_df(res_all, "Rezultati"),
                        file_name="rezultati.xlsx")
 
@@ -1138,6 +1148,19 @@ def section_competitions():
                    date_from AS od, date_to AS do, place AS mjesto, country AS država, country_code AS ISO3
             FROM competitions ORDER BY date_from DESC
         """, conn)
+
+    # formatiranje datuma i rednog broja
+    if 'od' in cdf.columns:
+        try:
+            cdf['od'] = pd.to_datetime(cdf['od']).dt.strftime('%d.%m.%Y.')
+        except Exception:
+            pass
+    if 'do' in cdf.columns:
+        try:
+            cdf['do'] = pd.to_datetime(cdf['do']).dt.strftime('%d.%m.%Y.')
+        except Exception:
+            pass
+    cdf.insert(0, 'R.br.', range(1, len(cdf)+1))
     st.dataframe(cdf, use_container_width=True)
 
     conn.close()
