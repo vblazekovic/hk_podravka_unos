@@ -1,5 +1,5 @@
-streamlit
-pandas
-reportlab
-Pillow
-xlsxwriter
+
+streamlit>=1.37
+pandas>=2.2
+xlsxwriter>=3.2
+openpyxl>=3.1
