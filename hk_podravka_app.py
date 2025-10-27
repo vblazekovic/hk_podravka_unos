@@ -150,6 +150,7 @@ def init_db():
     ensure_column("members","postal_code","TEXT")
     ensure_column("members","athlete_phone","TEXT")
     ensure_column("members","parent_phone","TEXT")
+    ensure_column("members","parent_name","TEXT")
 
     # Treneri
     cur.execute("""
@@ -529,6 +530,7 @@ def section_club():
 # ==========================
 # ODJELJAK: ČLANOVI
 # ==========================
+
 def section_members():
     page_header("Članovi", "Unos, uvoz/izvoz, uređivanje, dokumenti i liječničke potvrde")
 
@@ -549,7 +551,6 @@ def section_members():
         try:
             df = pd.read_excel(upl).fillna("")
             for _, r in df.iterrows():
-                # pokušaj mapiranja grupe
                 gid = None
                 if r.get("grupa",""):
                     g = conn.execute("SELECT id FROM groups WHERE name=?", (r["grupa"],)).fetchone()
@@ -557,16 +558,16 @@ def section_members():
                 full_name = r.get("ime_prezime","") or (r.get("ime","")+" "+r.get("prezime","")).strip()
                 conn.execute("""INSERT INTO members
                     (full_name,first_name,last_name,dob,gender,oib,street,city,postal_code,residence,
-                     athlete_email,parent_email,athlete_phone,parent_phone,
+                     athlete_email,parent_email,athlete_phone,parent_phone,parent_name,
                      id_card_number,id_card_issuer,id_card_valid_until,
                      passport_number,passport_issuer,passport_valid_until,
                      active_competitor,veteran,other_flag,membership_fee_eur,group_id)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (full_name, r.get("ime",""), r.get("prezime",""), r.get("datum_rođenja",""), r.get("spol(M/Ž)",""),
                      r.get("oib",""), r.get("ulica",""), r.get("grad",""), r.get("poštanski_broj",""),
                      f"{r.get('ulica','')}, {r.get('grad','')} {r.get('poštanski_broj','')}",
                      r.get("email_sportaša",""), r.get("email_roditelja",""),
-                     r.get("telefon_sportaša",""), r.get("telefon_roditelja",""),
+                     r.get("telefon_sportaša",""), r.get("telefon_roditelja",""), r.get("roditelj_ime_prezime",""),
                      r.get("osobna_broj",""), r.get("osobna_izdavatelj",""), r.get("osobna_vrijedi_do",""),
                      r.get("putovnica_broj",""), r.get("putovnica_izdavatelj",""), r.get("putovnica_vrijedi_do",""),
                      int(r.get("aktivni_natjecatelj(0/1)",0) or 0),
@@ -581,17 +582,35 @@ def section_members():
     st.markdown("---")
     st.subheader("Upis novog člana")
     with st.form("new_member"):
+        # Grupa – istaknuta na početku
+        groups = [r[0] for r in conn.execute("SELECT name FROM groups ORDER BY name").fetchall()]
+        group_name = st.selectbox("Grupa (odaberi)", [""] + groups)
+
         c1, c2 = st.columns(2)
         first_name = c1.text_input("Ime")
         last_name  = c1.text_input("Prezime")
         full_name  = f"{first_name} {last_name}".strip()
-        dob = c1.date_input("Datum rođenja", value=None)
+
+        # Datum rođenja i starost
+        dob = c1.date_input("Datum rođenja", value=None, help="dan.mjesec.godina")
+        if dob:
+            # izračun starosti
+            today = date.today()
+            delta = today - dob
+            years = delta.days // 365
+            days_rem = delta.days - years * 365
+            st.caption(f"Starost: **{years} godina, {days_rem} dana**")
+
         gender = c1.selectbox("Spol", ["", "M", "Ž"])
         oib = c1.text_input("OIB")
+
+        # Adresa split u zasebne kolone
         street = c1.text_input("Ulica i kućni broj")
-        city = c1.text_input("Grad")
+        city = c1.text_input("Mjesto/Grad")
         postal_code = c1.text_input("Poštanski broj")
 
+        # Roditelji i kontakti
+        parent_name  = c2.text_input("Ime i prezime roditelja/skrbnika")
         athlete_email = c2.text_input("E-mail sportaša")
         parent_email  = c2.text_input("E-mail roditelja")
         athlete_phone = c2.text_input("Telefon sportaša (za WhatsApp)")
@@ -619,15 +638,22 @@ def section_members():
         # Slika člana
         photo = st.file_uploader("Slika člana (jpg/png)", type=["png","jpg","jpeg"])
 
-        # Grupa
-        groups = [r[0] for r in conn.execute("SELECT name FROM groups ORDER BY name").fetchall()]
-        group_name = st.selectbox("Grupa", [""] + groups)
+        # Liječnički pregled – prvo datum, uz odbrojavanje
+        st.markdown("**Liječnička potvrda**")
+        colm1, colm2 = st.columns([2,1])
+        medical_valid = colm1.date_input("Liječnička vrijedi do", value=None, help="dan.mjesec.godina")
+        # countdown prikaz
+        if medical_valid:
+            days_left = (medical_valid - date.today()).days
+            style = "color:#333;"
+            if days_left <= 14:
+                style = "color:#b00020; font-weight:600;"
+            colm2.markdown(f"<div style='{style}'>Preostalo: {days_left} dana</div>", unsafe_allow_html=True)
+        medical = st.file_uploader("Upload liječničke potvrde (pdf/jpg/png)", type=["pdf","jpg","jpeg","png"])
 
-        # Dokumenti: privola/pristupnica i liječničko
+        # Privola i pristupnica
         consent = st.file_uploader("Privola (pdf/jpg/png)", type=["pdf","jpg","jpeg","png"])
         application = st.file_uploader("Pristupnica (pdf/jpg/png)", type=["pdf","jpg","jpeg","png"])
-        medical = st.file_uploader("Liječnička potvrda (pdf/jpg/png)", type=["pdf","jpg","jpeg","png"])
-        medical_valid = st.date_input("Liječnička vrijedi do", value=None, help="Obavezno upišite datum isteka potvrde.")
 
         submit_member = st.form_submit_button("Spremi člana")
 
@@ -643,7 +669,7 @@ def section_members():
 
         conn.execute("""INSERT INTO members
             (full_name,first_name,last_name,dob,gender,oib,street,city,postal_code,residence,
-             athlete_email,parent_email,athlete_phone,parent_phone,
+             athlete_email,parent_email,athlete_phone,parent_phone,parent_name,
              id_card_number,id_card_issuer,id_card_valid_until,
              passport_number,passport_issuer,passport_valid_until,
              active_competitor,veteran,other_flag,membership_fee_eur,
@@ -651,7 +677,7 @@ def section_members():
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (full_name, first_name, last_name, str(dob) if dob else "", gender, oib,
              street, city, postal_code, f"{street}, {city} {postal_code}",
-             athlete_email, parent_email, athlete_phone, parent_phone,
+             athlete_email, parent_email, athlete_phone, parent_phone, parent_name,
              id_card_number, id_card_issuer, str(id_card_valid_until) if id_card_valid_until else "",
              passport_number, passport_issuer, str(passport_valid_until) if passport_valid_until else "",
              int(active_competitor), int(veteran), int(other_flag), float(fee),
@@ -659,19 +685,49 @@ def section_members():
         conn.commit()
         st.success("Član je spremljen.")
 
-    # Popis članova + export + upozorenja o liječničkoj
+    # Popis članova – format datuma dd.mm.yyyy, dob (godine,dani), R.br. od 1
     st.markdown("---")
     st.subheader("Popis članova")
+
+    def fmt_date(s):
+        if not s: return ""
+        try:
+            d = pd.to_datetime(s).date()
+            return d.strftime("%d.%m.%Y.")
+        except Exception:
+            return str(s)
+
     mdf = pd.read_sql_query("""
         SELECT m.id, m.full_name AS ime_prezime, m.first_name AS ime, m.last_name AS prezime,
                m.gender AS spol, m.oib, m.street AS ulica, m.city AS grad, m.postal_code AS poštanski_broj,
-               m.athlete_email, m.parent_email, m.athlete_phone, m.parent_phone,
+               m.athlete_email, m.parent_email, m.athlete_phone, m.parent_phone, m.parent_name,
                m.active_competitor AS aktivni, m.veteran,
-               m.membership_fee_eur AS članarina, m.medical_valid_until AS liječnička_do,
+               m.membership_fee_eur AS članarina, m.medical_valid_until AS liječnička_do, m.dob,
                g.name AS grupa
         FROM members m LEFT JOIN groups g ON m.group_id=g.id
         ORDER BY m.full_name
     """, conn)
+
+    if not mdf.empty:
+        # izračun starosti kao tekst
+        ages = []
+        for _, r in mdf.iterrows():
+            if r["dob"]:
+                try:
+                    dd = pd.to_datetime(r["dob"]).date()
+                    delta = date.today() - dd
+                    years = delta.days // 365
+                    days_rem = delta.days - years * 365
+                    ages.append(f"{years} godina, {days_rem} dana")
+                except Exception:
+                    ages.append("")
+            else:
+                ages.append("")
+        mdf.insert(0, "R.br.", range(1, len(mdf) + 1))
+        mdf["dob"] = mdf["dob"].apply(fmt_date)
+        mdf["liječnička_do"] = mdf["liječnička_do"].apply(fmt_date)
+        mdf.insert(3, "starost", ages)
+
     st.dataframe(mdf, use_container_width=True)
 
     # Export članova
@@ -686,10 +742,10 @@ def section_members():
         for _, row in mdf.iterrows():
             if row["liječnička_do"]:
                 try:
-                    exp = datetime.fromisoformat(str(row["liječnička_do"])).date()
+                    exp = datetime.strptime(row["liječnička_do"], "%d.%m.%Y.").date()
                 except Exception:
                     try:
-                        exp = datetime.strptime(str(row["liječnička_do"]), "%Y-%m-%d").date()
+                        exp = pd.to_datetime(row["liječnička_do"]).date()
                     except Exception:
                         continue
                 days = (exp - today).days
@@ -700,7 +756,7 @@ def section_members():
             for nm, d in warn:
                 st.write(f"- {nm}: {d} dana")
 
-    # Uređivanje/brisanje člana + kontakt gumbi + pregled rezultata
+    # Uređivanje/brisanje + kontakti i rezultati ostaju kao u prethodnoj verziji
     st.markdown("---")
     st.subheader("Uredi / obriši člana, kontakt i rezultati")
     ids = [r[0] for r in conn.execute("SELECT id FROM members ORDER BY full_name").fetchall()]
@@ -711,6 +767,11 @@ def section_members():
         data = dict(zip(cols, row))
 
         with st.form("edit_member"):
+            # Grupa
+            groups = [r[0] for r in conn.execute("SELECT name FROM groups ORDER BY name").fetchall()]
+            current_group = conn.execute("SELECT name FROM groups WHERE id=?", (data.get("group_id"),)).fetchone()
+            gsel = st.selectbox("Grupa", [""] + groups, index=([""]+groups).index(current_group[0]) if current_group else 0)
+
             e1, e2 = st.columns(2)
             data["first_name"] = e1.text_input("Ime", data.get("first_name",""))
             data["last_name"]  = e1.text_input("Prezime", data.get("last_name",""))
@@ -720,6 +781,7 @@ def section_members():
             data["city"]       = e1.text_input("Grad", data.get("city",""))
             data["postal_code"]= e1.text_input("Poštanski broj", data.get("postal_code",""))
 
+            data["parent_name"]  = e2.text_input("Ime i prezime roditelja/skrbnika", data.get("parent_name",""))
             data["athlete_email"] = e2.text_input("E-mail sportaša", data.get("athlete_email",""))
             data["parent_email"]  = e2.text_input("E-mail roditelja", data.get("parent_email",""))
             data["athlete_phone"] = e2.text_input("Telefon sportaša", data.get("athlete_phone",""))
@@ -731,14 +793,16 @@ def section_members():
             data["veteran"]           = int(ch2.checkbox("Veteran", bool(data.get("veteran"))))
             data["other_flag"]        = int(ch3.checkbox("Ostalo", bool(data.get("other_flag"))))
 
-            med1, med2 = st.columns(2)
+            # Liječnička datum s countdown prikazom
+            med1, med2 = st.columns([2,1])
             med_valid = med1.date_input("Liječnička vrijedi do",
-                                        value=datetime.strptime(data.get("medical_valid_until","1900-01-01"), "%Y-%m-%d").date()
-                                        if data.get("medical_valid_until") else None)
-            # promjena grupe
-            groups = [r[0] for r in conn.execute("SELECT name FROM groups ORDER BY name").fetchall()]
-            current_group = conn.execute("SELECT name FROM groups WHERE id=?", (data.get("group_id"),)).fetchone()
-            gsel = med2.selectbox("Grupa", [""] + groups, index=([""]+groups).index(current_group[0]) if current_group else 0)
+                                        value=pd.to_datetime(data.get("medical_valid_until")).date() if data.get("medical_valid_until") else None)
+            if med_valid:
+                days_left = (med_valid - date.today()).days
+                style = "color:#333;"
+                if days_left <= 14:
+                    style = "color:#b00020; font-weight:600;"
+                med2.markdown(f"<div style='{style}'>Preostalo: {days_left} dana</div>", unsafe_allow_html=True)
 
             if st.form_submit_button("Spremi izmjene"):
                 full_name = f"{data['first_name']} {data['last_name']}".strip() or data.get("full_name","")
@@ -749,23 +813,18 @@ def section_members():
                     gid = r[0] if r else None
                 conn.execute("""UPDATE members SET
                     full_name=?, first_name=?, last_name=?, gender=?, oib=?, street=?, city=?, postal_code=?,
-                    athlete_email=?, parent_email=?, athlete_phone=?, parent_phone=?,
+                    parent_name=?, athlete_email=?, parent_email=?, athlete_phone=?, parent_phone=?,
                     membership_fee_eur=?, active_competitor=?, veteran=?, other_flag=?, medical_valid_until=?, group_id=?
                     WHERE id=?""",
                     (data["full_name"], data["first_name"], data["last_name"], data["gender"], data["oib"],
                      data["street"], data["city"], data["postal_code"],
-                     data["athlete_email"], data["parent_email"], data["athlete_phone"], data["parent_phone"],
+                     data["parent_name"], data["athlete_email"], data["parent_email"], data["athlete_phone"], data["parent_phone"],
                      float(data["membership_fee_eur"]), int(data["active_competitor"]), int(data["veteran"]), int(data["other_flag"]),
                      str(med_valid) if med_valid else "", gid, int(sel_id)))
                 conn.commit()
                 st.success("Izmjene spremljene.")
 
-        colbtn1, colbtn2, colbtn3 = st.columns(3)
-        if colbtn1.button("Obriši ovog člana"):
-            conn.execute("DELETE FROM members WHERE id=?", (int(sel_id),))
-            conn.commit()
-            st.success("Član obrisan.")
-        # Kontakt gumbi
+        # Kontakti + rezultati kao prije
         subject = "Obavijest HK Podravka"
         email_row = conn.execute("SELECT athlete_email, parent_email, athlete_phone, parent_phone FROM members WHERE id=?", (int(sel_id),)).fetchone()
         a_email, p_email, a_phone, p_phone = email_row if email_row else ("","","","")
@@ -786,7 +845,16 @@ def section_members():
             JOIN competitions c ON c.id=cr.competition_id
             WHERE cr.member_id=? ORDER BY c.date_from DESC
         """, conn, params=(int(sel_id),))
+        # formatiraj datum
+        if not rdf.empty:
+            rdf["datum"] = pd.to_datetime(rdf["datum"]).dt.strftime("%d.%m.%Y.")
         st.dataframe(rdf, use_container_width=True)
+
+        colbtn1, colbtn2 = st.columns(2)
+        if colbtn1.button("Obriši ovog člana"):
+            conn.execute("DELETE FROM members WHERE id=?", (int(sel_id),))
+            conn.commit()
+            st.success("Član obrisan.")
     else:
         st.info("Nema članova u bazi.")
 
